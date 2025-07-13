@@ -1,0 +1,18 @@
+# FunASR VAD 关键词激活录音系统依赖
+
+# 基础依赖
+numpy>=1.20.0
+scipy>=1.8.0
+pyaudio>=0.2.11
+colorama>=0.4.4
+
+# FunASR 核心依赖
+funasr>=0.8.0
+torch>=2.0.0
+torchaudio>=2.0.0
+
+# 可选：使用 conda 安装以提高稳定性
+# conda install -y numpy scipy
+# conda install -y pytorch torchaudio -c pytorch
+# conda install -y colorama
+# pip install funasr pyaudio
