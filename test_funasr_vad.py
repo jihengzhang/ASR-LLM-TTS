@@ -52,9 +52,26 @@ def test_vad_model():
     print("\n正在测试 FunASR VAD 模型...")
     
     try:
-        # 加载 VAD 模型
+        # 检查本地模型
+        local_model_path = os.path.join(os.getcwd(), "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+        
         print("正在加载 VAD 模型...")
-        vad_model = AutoModel(model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch", model_revision="v2.0.4")
+        if os.path.exists(local_model_path):
+            print(f"[信息] 使用本地模型: {local_model_path}")
+            vad_model = AutoModel(
+                model=local_model_path,
+                disable_update=True,
+                device="cpu"
+            )
+        else:
+            print("[信息] 未找到本地模型，尝试远程模型...")
+            vad_model = AutoModel(
+                model="damo/speech_fsmn_vad_zh-cn-16k-common-pytorch", 
+                model_revision="v2.0.4",
+                disable_update=True,
+                device="cpu"
+            )
+        
         print("[成功] VAD 模型加载成功")
         
         # 录制短音频进行测试

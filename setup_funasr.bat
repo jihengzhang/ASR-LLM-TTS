@@ -1,63 +1,63 @@
 @echo off
 chcp 65001 >nul
-title FunASR 一键安装和测试
+title FunASR One-Click Installation and Testing
 cls
 echo.
 echo  ====================================================
-echo     FunASR 一键安装和测试工具
+echo     FunASR One-Click Installation and Testing Tool
 echo  ====================================================
 echo.
 
-@REM :: 检查管理员权限
+@REM :: Check administrator privileges
 @REM >nul 2>&1 "%SYSTEMROOT%\system32\cacls.exe" "%SYSTEMROOT%\system32\config\system"
 @REM if '%errorlevel%' NEQ '0' (
-@REM     echo  [警告] 请以管理员身份运行此脚本以获得最佳效果
-@REM     echo  [警告] 某些操作可能需要管理员权限
+@REM     echo  [WARNING] Please run this script as administrator for best results
+@REM     echo  [WARNING] Some operations may require administrator privileges
 @REM     echo.
-@REM     echo  按任意键继续...
+@REM     echo  Press any key to continue...
 @REM     pause > nul
 @REM )
 
-:: 创建录音目录
+:: Create recording directory
 if not exist recordings mkdir recordings
-echo  [INFO] 创建录音目录: recordings
+echo  [INFO] Created recording directory: recordings
 
-:: 创建模型目录
+:: Create model directory
 if not exist models mkdir models
-echo  [INFO] 创建模型目录: models
+echo  [INFO] Created model directory: models
 
-:: 尝试确定 Python 环境路径
+:: Try to determine Python environment path
 echo.
-echo  [INFO] 正在激活 Python 环境...
-call conda activate ..\pyenv 2>nul
+echo  [INFO] Activating Python environment...
+call conda activate ..\pyenv_3.10 2>nul
 if %errorlevel% EQU 0 (
-    echo  [INFO] 已激活环境: ..\pyenv
+    echo  [INFO] Activated environment: ..\pyenv_3.10
 ) else (
-    echo  [警告] 无法找到或激活 Python 环境: ..\pyenv
-    echo  [INFO] 将尝试使用系统默认的 Python
+    echo  [WARNING] Cannot find or activate Python environment: ..\pyenv_3.10
+    echo  [INFO] Will try to use system default Python
 )
 
-:: 显示菜单
+:: Display menu
 :menu
 cls
 echo.
 echo  ====================================================
-echo     FunASR 一键安装和测试工具
+echo     FunASR One-Click Installation and Testing Tool
 echo  ====================================================
 echo.
-echo  请选择要执行的操作:
+echo  Please select operation to execute:
 echo.
-echo  [1] 检查环境
-echo  [2] 安装依赖
-echo  [3] 安装 FunASR
-echo  [4] 下载 VAD 模型
-echo  [5] 测试 VAD 功能
-echo  [6] 运行 VAD 录音系统
-echo  [7] 全部执行 (1-6)
-echo  [8] 查看安装指南
-echo  [0] 退出
+echo  [1] Check Environment
+echo  [2] Install Dependencies
+echo  [3] Install FunASR
+echo  [4] Download VAD Model
+echo  [5] Test VAD Function
+echo  [6] Run VAD Recording System
+echo  [7] Execute All (1-6)
+echo  [8] View Installation Guide
+echo  [0] Exit
 echo.
-set /p choice="请输入选项 (0-8): "
+set /p choice="Please enter option (0-8): "
 
 if "%choice%"=="1" goto check_env
 if "%choice%"=="2" goto install_deps
@@ -72,160 +72,217 @@ goto menu
 
 :check_env
 echo.
-echo  [INFO] 开始检查环境...
+echo  [INFO] Starting environment check...
 python check_environment.py
 echo.
-echo  按任意键返回菜单...
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :install_deps
 echo.
-echo  [INFO] 安装基本依赖...
+echo  [INFO] Installing basic dependencies...
+echo  [INFO] Configuring pip for trusted hosts...
+pip config set global.trusted-host "pypi.org files.pythonhosted.org pypi.python.org www.modelscope.cn"
 pip install -r requirements.txt
 
 echo.
-echo  [INFO] 检查 ffmpeg 是否已安装...
+echo  [INFO] Checking if ffmpeg is installed...
 where ffmpeg >nul 2>nul
 if %errorlevel% neq 0 (
-    echo  [WARN] ffmpeg 未安装，现在将安装 ffmpeg...
-    echo  [INFO] 是否使用 conda 安装 ffmpeg? (推荐)
-    echo  1. 是 - 使用 conda 安装 (推荐)
-    echo  2. 否 - 使用下载方式
+    echo  [WARN] ffmpeg not installed, installing ffmpeg now...
+    echo  [INFO] Use conda to install ffmpeg? (recommended)
+    echo  1. Yes - Use conda install (recommended)
+    echo  2. No - Use download method
     echo.
-    set /p ffmpeg_choice="请选择 (1/2): "
+    set /p ffmpeg_choice="Please choose (1/2): "
 
     if "%ffmpeg_choice%"=="1" (
         echo.
-        echo  [INFO] 使用 conda 安装 ffmpeg...
+        echo  [INFO] Installing ffmpeg using conda...
         conda install -y ffmpeg -c conda-forge
     ) else (
         echo.
-        echo  [INFO] 请手动下载 ffmpeg 并将其添加到 PATH 环境变量中
-        echo  [INFO] 下载地址: https://ffmpeg.org/download.html
-        echo  [INFO] 按任意键继续...
+        echo  [INFO] Please manually download ffmpeg and add it to PATH environment variable
+        echo  [INFO] Download URL: https://ffmpeg.org/download.html
+        echo  [INFO] Press any key to continue...
         pause > nul
     )
 ) else (
-    echo  [INFO] ffmpeg 已安装
+    echo  [INFO] ffmpeg is already installed
 )
 
 echo.
-echo  [INFO] 是否使用 conda 安装 PyTorch? (推荐)
-echo  1. 是 - 使用 conda 安装 (推荐)
-echo  2. 否 - 使用 pip 安装
+echo  [INFO] Use conda to install PyTorch? (recommended)
+echo  1. Yes - Use conda install (recommended)
+echo  2. No - Use pip install
 echo.
-set /p pytorch_choice="请选择 (1/2): "
+set /p pytorch_choice="Please choose (1/2): "
 
 if "%pytorch_choice%"=="1" (
     echo.
-    echo  [INFO] 使用 conda 安装 PyTorch...
+    echo  [INFO] Installing PyTorch using conda...
     conda install -y pytorch torchaudio cpuonly -c pytorch
 ) else (
     echo.
-    echo  [INFO] 使用 pip 安装 PyTorch...
+    echo  [INFO] Installing PyTorch using pip...
     pip install torch torchaudio
 )
 
 echo.
-echo  依赖安装完成
-echo  按任意键返回菜单...
+echo  Dependencies installation completed
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :install_funasr
 echo.
-echo  [INFO] 安装 FunASR...
-pip install -U funasr
+echo  [INFO] Installing FunASR with SSL bypass...
+pip config set global.trusted-host "pypi.org files.pythonhosted.org pypi.python.org www.modelscope.cn"
+pip install -U funasr --trusted-host pypi.org --trusted-host files.pythonhosted.org
 echo.
-echo  FunASR 安装完成
-echo  按任意键返回菜单...
+echo  FunASR installation completed
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :download_model
 echo.
-echo  [INFO] 下载 FunASR VAD 模型到当前项目目录...
-echo  [INFO] 设置模型缓存目录为: %CD%
+echo  [INFO] Downloading FunASR VAD model to current project directory...
+echo  [INFO] Setting model cache directory to: %CD%
+echo  [INFO] Configuring SSL bypass for model download...
+
+REM Set environment variables to bypass SSL verification
+set PYTHONHTTPSVERIFY=0
+
+echo  [INFO] Trying model download with SSL bypass...
 python test_model_cache.py
+
+if %errorlevel% neq 0 (
+    echo  [WARNING] Model download failed, trying alternative method...
+    echo  [INFO] Setting up alternative model download configuration...
+    
+    REM Try pip configuration for trusted hosts
+    pip config set global.trusted-host "pypi.org files.pythonhosted.org pypi.python.org www.modelscope.cn"
+    
+    echo  [INFO] Creating temporary SSL bypass script...
+    echo import ssl > temp_ssl_bypass.py
+    echo import os >> temp_ssl_bypass.py
+    echo import urllib3 >> temp_ssl_bypass.py
+    echo urllib3.disable_warnings() >> temp_ssl_bypass.py
+    echo ssl._create_default_https_context = ssl._create_unverified_context >> temp_ssl_bypass.py
+    echo os.environ['PYTHONHTTPSVERIFY'] = '0' >> temp_ssl_bypass.py
+    echo os.environ.pop('CURL_CA_BUNDLE', None) >> temp_ssl_bypass.py
+    echo os.environ.pop('REQUESTS_CA_BUNDLE', None) >> temp_ssl_bypass.py
+    echo exec(open('test_model_cache.py', encoding='utf-8').read()) >> temp_ssl_bypass.py
+    
+    echo  [INFO] Trying direct model download with alternative settings...
+    python temp_ssl_bypass.py
+    
+    if %errorlevel% neq 0 (
+        echo  [ERROR] Model download still failed. Manual steps required:
+        echo  [INFO] 1. Check internet connection
+        echo  [INFO] 2. Try running: pip install --trusted-host pypi.org --trusted-host files.pythonhosted.org funasr
+        echo  [INFO] 3. Or download model manually from: https://www.modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-pytorch
+    )
+    
+    REM Clean up temporary file
+    if exist temp_ssl_bypass.py del temp_ssl_bypass.py
+)
+
+REM Reset environment variables
+set PYTHONHTTPSVERIFY=
+
 echo.
-echo  按任意键返回菜单...
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :test_vad
 echo.
-echo  [INFO] 测试 VAD 功能...
-call test_vad.bat
+echo  [INFO] Testing VAD function...
+call test_vad_en.bat
 echo.
-echo  按任意键返回菜单...
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :run_vad
 echo.
-echo  [INFO] 运行 VAD 录音系统...
-call run_vad.bat
+echo  [INFO] Running VAD recording system...
+call run_vad_en.bat
 echo.
-echo  按任意键返回菜单...
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :run_all
 echo.
-echo  [INFO] 执行所有步骤...
+echo  [INFO] Executing all steps...
 echo.
-echo  [步骤 1/6] 检查环境
+echo  [Step 1/6] Check Environment
 python check_environment.py
 echo.
-echo  [步骤 2/6] 安装依赖
+echo  [Step 2/6] Install Dependencies
 pip install -r requirements.txt
 
-echo  [INFO] 检查 ffmpeg...
+echo  [INFO] Checking ffmpeg...
 where ffmpeg >nul 2>nul
 if %errorlevel% neq 0 (
-    echo  [INFO] 安装 ffmpeg...
+    echo  [INFO] Installing ffmpeg...
     conda install -y ffmpeg -c conda-forge
 )
 
-echo  [INFO] 安装 PyTorch...
+echo  [INFO] Installing PyTorch...
 conda install -y pytorch torchaudio cpuonly -c pytorch
 
 echo.
-echo  [步骤 3/6] 安装 FunASR
+echo  [Step 3/6] Install FunASR
 pip install -U funasr
 
 echo.
-echo  [步骤 4/6] 下载 VAD 模型到当前项目目录
-echo  [INFO] 设置模型缓存目录为: %CD%
+echo  [Step 4/6] Download VAD model to current project directory
+echo  [INFO] Setting model cache directory to: %CD%
+echo  [INFO] Configuring SSL bypass for model download...
+
+REM Set SSL bypass environment variables
+set PYTHONHTTPSVERIFY=0
+
 python test_model_cache.py
 
-echo.
-echo  [步骤 5/6] 测试 VAD 功能
-call test_vad.bat
+REM Reset environment variables
+set PYTHONHTTPSVERIFY=
 
 echo.
-echo  [步骤 6/6] 运行 VAD 录音系统
-call run_vad.bat
+echo  [Step 5/6] Test VAD function
+call test_vad_en.bat
 
 echo.
-echo  全部步骤执行完成
-echo  按任意键返回菜单...
+echo  [Step 6/6] Run VAD recording system
+call run_vad_en.bat
+
+echo.
+echo  All steps execution completed
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :show_guide
 echo.
-echo  [INFO] 打开安装指南...
+echo  [INFO] Opening installation guide...
 start INSTALL_GUIDE.md
 echo.
-echo  按任意键返回菜单...
+echo  Press any key to return to menu...
 pause > nul
 goto menu
 
 :end
-@REM echo.
-@REM echo  感谢使用 FunASR 一键安装和测试工具
-@REM echo  按任意键退出...
+echo.
+echo  Thank you for using FunASR One-Click Installation and Testing Tool
+echo  Press any key to exit...
+pause > nul
+exit
+@REM echo  Thank you for using FunASR One-Click Installation and Testing Tool
+@REM echo  Press any key to exit...
 @REM pause > nul
 exit
