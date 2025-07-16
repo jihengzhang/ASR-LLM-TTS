@@ -8,8 +8,7 @@ from funasr import AutoModel
 # Local model path
 MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
 
-AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Try a different test audio file
-AUDIO_PATH = "test.wav"  # Try a different test audio file
+AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
 OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 VISUALIZE = True                           # Whether to visualize speech activity intervals
 SAVE_SEGMENTS = True                       # Whether to save detected speech segments
@@ -33,17 +32,31 @@ def load_audio(path):
         audio_data = audio_data[:, 0]  # Only use the first channel
     return audio_data, sample_rate
 
-def plot_vad_result(timestamps, total_duration):
-    """Visualize speech activity intervals"""
-    fig, ax = plt.subplots(figsize=(12, 2))
-    ax.set_title("VAD Result - Speech Activity Detection")
-    ax.set_xlim(0, total_duration)
-    ax.set_ylim(0, 1)
-    ax.set_yticks([])
-    ax.set_xlabel("Time (seconds)")
+def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
+    """Visualize speech activity intervals with audio waveform"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), gridspec_kw={'height_ratios': [3, 1]})
+    
+    # Plot audio waveform in the top subplot
+    time_axis = np.linspace(0, total_duration, len(audio_data))
+    ax1.plot(time_axis, audio_data, color='blue', linewidth=0.5)
+    ax1.set_title("Audio Waveform")
+    ax1.set_xlim(0, total_duration)
+    ax1.set_ylabel("Amplitude")
+    
+    # Highlight speech segments in the waveform
+    for start, end in timestamps:
+        ax1.axvspan(start, end, color='green', alpha=0.2)
+    
+    # Plot VAD result in the bottom subplot
+    ax2.set_title("VAD Result - Speech Activity Detection")
+    ax2.set_xlim(0, total_duration)
+    ax2.set_ylim(0, 1)
+    ax2.set_yticks([])
+    ax2.set_xlabel("Time (seconds)")
 
     for start, end in timestamps:
-        ax.fill_between([start, end], 0, 1, color="green", alpha=0.6)
+        ax2.fill_between([start, end], 0, 1, color="green", alpha=0.6)
+    
     plt.tight_layout()
     plt.show()
 
@@ -72,7 +85,7 @@ def main():
     try:
         # Load model and build VAD Inference Session
         print(f"Loading VAD model from: {MODEL_PATH}")
-        vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cpu")
+        vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cpu", disable_update=True)
         
         # Read audio file
         print(f"Loading audio file: {AUDIO_PATH}")
@@ -107,7 +120,7 @@ def main():
 
         # Draw plot showing speech activity intervals
         if VISUALIZE:
-            plot_vad_result(timestamps, duration)
+            plot_vad_result(audio_data, sample_rate, timestamps, duration)
 
         # Save speech segments as separate files
         if SAVE_SEGMENTS and timestamps:
