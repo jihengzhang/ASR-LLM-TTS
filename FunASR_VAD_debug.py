@@ -22,7 +22,7 @@ except ImportError:
 
 class KeywordActivatedRecorder:
     def __init__(self, sample_rate=16000, chunk_size=1024, channels=1, 
-                 format=pyaudio.paInt16, threshold=0.01, 
+                 format=pyaudio.paInt16, threshold=0.03, 
                  silence_duration=2.0, min_speech_duration=1.0,
                  buffer_duration=5.0):
         """
@@ -62,7 +62,6 @@ class KeywordActivatedRecorder:
         self.pyaudio = pyaudio.PyAudio()
         self.stream = None
         self.frames = []
-        self.input_device_index = None  # Will be set by check_audio_devices
         
         # Check audio devices
         self.check_audio_devices()
@@ -91,11 +90,10 @@ class KeywordActivatedRecorder:
         self.vad_cache = {}
         self.accumulated_audio = np.array([], dtype=np.float32)
         self.last_vad_check = time.time()
-        self.vad_check_interval = 1.0  # Reduced to 1 second for more responsive detection
+        self.vad_check_interval = 3.0  # VAD check every 3 seconds
         # Use 16000 samples (1 second) window, ensure it's a multiple of 400
         self.vad_window_size = 16000  # 1 second window
         self.audio_buffer_for_vad = np.array([], dtype=np.float32)
-        self.min_vad_amplitude = 0.001  # Minimum amplitude to trigger VAD processing
         
         print(f"{Fore.YELLOW}[关键词]{Style.RESET_ALL} 当前激活关键词: '{self.current_keyword}'")
         print(f"{Fore.CYAN}[提示]{Style.RESET_ALL} 使用 FunASR VAD+ASR 进行关键词检测")
@@ -128,29 +126,16 @@ class KeywordActivatedRecorder:
     def start(self):
         """Start listening to audio"""
         print(f"{Fore.CYAN}[SYSTEM]{Style.RESET_ALL} Starting audio monitoring...")
-        
-        # Test microphone input first
-        print(f"{Fore.CYAN}[TEST]{Style.RESET_ALL} Testing microphone input...")
-        
-        try:
-            self.stream = self.pyaudio.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                input_device_index=self.input_device_index,
-                frames_per_buffer=self.chunk_size,
-                stream_callback=self.audio_callback
-            )
-            self.stream.start_stream()
-            print(f"{Fore.GREEN}[READY]{Style.RESET_ALL} Voice activation system started, waiting for speech...")
-            
-            # Test a few chunks to see if we're getting audio
-            print(f"{Fore.CYAN}[MONITOR]{Style.RESET_ALL} Monitoring first few audio chunks...")
-            
-        except Exception as e:
-            print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Failed to start audio stream: {e}")
-            print(f"{Fore.YELLOW}[SUGGESTION]{Style.RESET_ALL} Try running Windows Sound settings to check microphone permissions")
+        self.stream = self.pyaudio.open(
+            format=self.format,
+            channels=self.channels,
+            rate=self.sample_rate,
+            input=True,
+            frames_per_buffer=self.chunk_size,
+            stream_callback=self.audio_callback
+        )
+        self.stream.start_stream()
+        print(f"{Fore.GREEN}[READY]{Style.RESET_ALL} Voice activation system started, waiting for speech...")
         
     def stop(self):
         """Stop listening and close resources"""
@@ -165,22 +150,6 @@ class KeywordActivatedRecorder:
         """Audio callback function to process input audio data"""
         # Convert binary data to array
         audio_data = np.frombuffer(in_data, dtype=np.int16)
-        
-        # Debug: Check if we're getting actual audio data
-        non_zero_samples = np.count_nonzero(audio_data)
-        max_amplitude = np.max(np.abs(audio_data))
-        
-        if hasattr(self, 'debug_counter'):
-            self.debug_counter += 1
-        else:
-            self.debug_counter = 1
-            
-        # Print debug info for first 10 chunks or when there's significant audio
-        if self.debug_counter <= 10 or max_amplitude > 100:
-            print(f"\n{Fore.CYAN}[AUDIO DEBUG]{Style.RESET_ALL} Chunk {self.debug_counter}: Non-zero samples: {non_zero_samples}/{len(audio_data)}, Max amplitude: {max_amplitude}")
-            if self.debug_counter <= 3:
-                print(f"Sample data: {audio_data[:10]}...{audio_data[-10:]}")
-        
         # Calculate audio amplitude (normalized)
         amplitude = np.abs(audio_data).mean() / 32767.0
         
@@ -206,11 +175,7 @@ class KeywordActivatedRecorder:
                 
                 # Periodic VAD detection
                 current_time = time.time()
-                # Also trigger VAD if we have significant audio activity
-                has_significant_audio = np.mean(np.abs(audio_float)) > self.min_vad_amplitude
-                
-                if (current_time - self.last_vad_check >= self.vad_check_interval and not self.recording) or \
-                   (has_significant_audio and current_time - self.last_vad_check >= 0.5):  # More frequent checks when audio is present
+                if current_time - self.last_vad_check >= self.vad_check_interval and not self.recording:
                     self.last_vad_check = current_time
                     
                     # Check if there's enough audio data for VAD
@@ -219,42 +184,27 @@ class KeywordActivatedRecorder:
                         window_samples = (self.vad_window_size // 400) * 400
                         vad_window = self.audio_buffer_for_vad[:window_samples]
                         
-                        # Debug: Check the audio data going into VAD
-                        vad_audio_stats = {
-                            'length': len(vad_window),
-                            'max_val': np.max(np.abs(vad_window)),
-                            'mean_val': np.mean(np.abs(vad_window)),
-                            'non_zero_count': np.count_nonzero(vad_window),
-                            'shape': vad_window.shape
-                        }
-                        print(f"\n{Fore.CYAN}[VAD DEBUG]{Style.RESET_ALL} Audio stats: {vad_audio_stats}")
-                        
                         try:
                             # Use VAD model for speech detection
                             vad_result = self.vad_model.generate(
                                 input=vad_window.reshape(1, -1),
-                                chunk_size=1024 )#Specify chunk size                            )
-                            print(f"\n{Fore.CYAN}[VAD RESULT]{Style.RESET_ALL} Raw VAD result: {vad_result}")
+                                chunk_size=400  # Specify chunk size
+                            )
                             
                             # Check VAD result
                             if isinstance(vad_result, list) and len(vad_result) > 0:
                                 result_dict = vad_result[0]
-                                
                                 if isinstance(result_dict, dict) and 'value' in result_dict:
                                     vad_segments = result_dict['value']
-                                    print(f"\n{Fore.YELLOW}[VAD SEGMENTS]{Style.RESET_ALL} Found {len(vad_segments)} segments: {vad_segments}")
                                     
                                     # If speech segments are detected, process them
                                     if vad_segments and not self.recording and not self.keyword_detected:
-                                        print(f"\n{Fore.GREEN}[VAD SUCCESS]{Style.RESET_ALL} Processing {len(vad_segments)} speech segments")
+                                        print(f"\n{Fore.CYAN}[VAD]{Style.RESET_ALL} Detected {len(vad_segments)} speech segments")
                                         
-                                        # Process each segment
-                                        for i, segment in enumerate(vad_segments):
+                                        # Extract audio for each detected speech segment
+                                        for segment in vad_segments:
                                             if isinstance(segment, (list, tuple)) and len(segment) >= 2:
                                                 start_time, end_time = segment[0], segment[1]
-                                                duration = end_time - start_time
-                                                print(f"\n{Fore.CYAN}[SEGMENT {i+1}]{Style.RESET_ALL} Time: {start_time:.2f}s - {end_time:.2f}s (Duration: {duration:.2f}s)")
-                                                
                                                 # Convert time units to sample points
                                                 start_sample = int(start_time * self.sample_rate)
                                                 end_sample = int(end_time * self.sample_rate)
@@ -269,7 +219,6 @@ class KeywordActivatedRecorder:
                                                 if end_sample > start_sample:
                                                     segment_audio = vad_window[start_sample:end_sample]
                                                     if len(segment_audio) >= 1600:  # At least 100ms
-                                                        print(f"\n{Fore.BLUE}[PROCESSING]{Style.RESET_ALL} Sending segment {i+1} to ASR (length: {len(segment_audio)} samples)")
                                                         # Use thread for asynchronous keyword recognition
                                                         threading.Thread(
                                                             target=self.recognize_keyword,
@@ -281,16 +230,8 @@ class KeywordActivatedRecorder:
                                                         segment_amplitude = np.abs(segment_audio).mean()
                                                         if segment_amplitude > self.threshold * 1.5:
                                                             is_speech = True
-                                                    else:
-                                                        print(f"\n{Fore.YELLOW}[SKIP]{Style.RESET_ALL} Segment {i+1} too short: {len(segment_audio)} samples")
                                             else:
                                                 print(f"\n{Fore.YELLOW}[VAD]{Style.RESET_ALL} Invalid speech segment format: {segment}")
-                                    elif not vad_segments:
-                                        print(f"\n{Fore.BLUE}[VAD]{Style.RESET_ALL} No speech segments detected in this window")
-                                else:
-                                    print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} 'value' key not found in result_dict or result_dict is not a dict")
-                            else:
-                                print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} Invalid VAD result format")
                         except Exception as vad_error:
                             print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} {vad_error}")
                             # If VAD processing fails, fall back to amplitude-based detection
@@ -367,64 +308,6 @@ class KeywordActivatedRecorder:
         
         return (in_data, pyaudio.paContinue)
     
-    def process_vad(self, audio_data):
-        """Process audio data with VAD model to detect speech segments
-        
-        Args:
-            audio_data: Audio data as float32 numpy array, normalized to [-1.0, 1.0]
-            
-        Returns:
-            tuple: (is_speech, vad_segments)
-                is_speech: Boolean indicating if speech was detected
-                vad_segments: List of speech segments detected by VAD, each as [start_time, end_time]
-        """
-        # Default to amplitude-based detection
-        is_speech = np.mean(np.abs(audio_data)) > self.threshold
-        vad_segments = []
-        
-        # If VAD model is not available, return amplitude-based result
-        if self.vad_model is None:
-            return is_speech, vad_segments
-            
-        try:
-            # Debug: Check the audio data going into VAD
-            vad_audio_stats = {
-                'length': len(audio_data),
-                'max_val': np.max(np.abs(audio_data)),
-                'mean_val': np.mean(np.abs(audio_data)),
-                'non_zero_count': np.count_nonzero(audio_data),
-                'shape': audio_data.shape
-            }
-            print(f"\n{Fore.CYAN}[VAD DEBUG]{Style.RESET_ALL} Audio stats: {vad_audio_stats}")
-            
-            # Use VAD model for speech detection
-            vad_result = self.vad_model.generate(
-                input=audio_data.reshape(1, -1),
-                chunk_size=1024  # Specify chunk size
-            )
-            print(f"\n{Fore.CYAN}[VAD RESULT]{Style.RESET_ALL} Raw VAD result: {vad_result}")
-            
-            # Check VAD result
-            if isinstance(vad_result, list) and len(vad_result) > 0:
-                result_dict = vad_result[0]
-                
-                if isinstance(result_dict, dict) and 'value' in result_dict:
-                    vad_segments = result_dict['value']
-                    print(f"\n{Fore.YELLOW}[VAD SEGMENTS]{Style.RESET_ALL} Found {len(vad_segments)} segments: {vad_segments}")
-                    
-                    # If any speech segments detected, consider this as speech
-                    is_speech = len(vad_segments) > 0
-                else:
-                    print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} 'value' key not found in result_dict or result_dict is not a dict")
-            else:
-                print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} Invalid VAD result format")
-        except Exception as vad_error:
-            print(f"\n{Fore.RED}[VAD ERROR]{Style.RESET_ALL} {vad_error}")
-            # Fall back to amplitude-based detection
-            is_speech = np.mean(np.abs(audio_data)) > self.threshold
-            
-        return is_speech, vad_segments
-
     def process_vad_segments(self, vad_segments, audio_data):
         """Process VAD detected speech segments (simplified, mainly handled by recognize_keyword)"""
         # This method is now mainly used for debug information
@@ -569,7 +452,7 @@ class KeywordActivatedRecorder:
                 info = self.pyaudio.get_device_info_by_index(i)
                 if info['maxInputChannels'] > 0:
                     input_devices.append((i, info['name']))
-                    print(f"  {Fore.GREEN}[{i}]{Style.RESET_ALL} {info['name']} (Input channels: {info['maxInputChannels']}, Sample rate: {info['defaultSampleRate']})")
+                    print(f"  {Fore.GREEN}[{i}]{Style.RESET_ALL} {info['name']} (Input channels: {info['maxInputChannels']})")
             except Exception as e:
                 continue
         
@@ -578,16 +461,9 @@ class KeywordActivatedRecorder:
         
         try:
             default_input = self.pyaudio.get_default_input_device_info()
-            print(f"{Fore.GREEN}[DEFAULT]{Style.RESET_ALL} Using default input device: {default_input['name']} (Index: {default_input['index']})")
-            self.input_device_index = default_input['index']
+            print(f"{Fore.GREEN}[DEFAULT]{Style.RESET_ALL} Using default input device: {default_input['name']}")
         except Exception as e:
             print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} Cannot get default input device: {e}")
-            # Use first available input device
-            if input_devices:
-                self.input_device_index = input_devices[0][0]
-                print(f"{Fore.YELLOW}[FALLBACK]{Style.RESET_ALL} Using first available device: {input_devices[0][1]}")
-            else:
-                self.input_device_index = None
         
         print(f"{Fore.CYAN}[READY]{Style.RESET_ALL} Found {len(input_devices)} available input devices\n")
     
@@ -601,7 +477,7 @@ class KeywordActivatedRecorder:
             audio_length = len(audio_data) / self.sample_rate
             
             # Simplified heuristic detection
-            if 0.1 <= audio_length <= 2.0 and amplitude > self.threshold * 2:
+            if 0.4 <= audio_length <= 2.0 and amplitude > self.threshold * 2:
                 mid_point = len(audio_data) // 2
                 first_half_energy = np.sum(audio_data[:mid_point].astype(float) ** 2)
                 second_half_energy = np.sum(audio_data[mid_point:].astype(float) ** 2)
@@ -698,10 +574,8 @@ if __name__ == "__main__":
         
         recorder.start()
         print(f"{Fore.GREEN}[STATUS]{Style.RESET_ALL} FunASR VAD+ASR keyword detection system started")
-        print(f"{Fore.CYAN}[WAITING]{Style.RESET_ALL} Please say the keyword '{Fore.GREEN}你好{Style.RESET_ALL}' to activate recording")
-        print(f"{Fore.BLUE}[TIP]{Style.RESET_ALL} System will show real-time VAD detection status and speech recognition results")
-        print(f"{Fore.YELLOW}[TESTING]{Style.RESET_ALL} Try speaking clearly for 2-3 seconds to test VAD detection")
-        print(f"{Fore.YELLOW}[KEYWORDS]{Style.RESET_ALL} Supported: 你好, 小助手, 开始录音, 录音开始, 小爱, 小度\n")
+        print(f"{Fore.CYAN}[WAITING]{Style.RESET_ALL} Please say the keyword '{Fore.GREEN}hello{Style.RESET_ALL}' to activate recording")
+        print(f"{Fore.BLUE}[TIP]{Style.RESET_ALL} System will show real-time VAD detection status and speech recognition results\n")
         
         # Keep program running
         while True:
