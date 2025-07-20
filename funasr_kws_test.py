@@ -33,8 +33,8 @@ except Exception as e:
 try:
     print(f"Running speech recognition on: {AUDIO_FILE}")
     result = asr_model.generate(input=AUDIO_FILE, cache={}, language="zh")
-    print("ASR Result:")
-    print(result)
+    print(f"ASR Result: {result}")
+    # print(result)
     
     # Extract transcription text
     if result and isinstance(result, list) and len(result) > 0:
