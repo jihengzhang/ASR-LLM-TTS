@@ -172,7 +172,7 @@ class KeywordActivatedRecorder:
                 
                 # Add to VAD specific buffer
                 self.audio_buffer_for_vad = np.concatenate([self.audio_buffer_for_vad, audio_float])
-                
+                print(f"Length of audio buffer for VAD: {len(self.audio_buffer_for_vad)} samples")
                 # Periodic VAD detection
                 current_time = time.time()
                 if current_time - self.last_vad_check >= self.vad_check_interval and not self.recording:
