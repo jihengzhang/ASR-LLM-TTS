@@ -9,9 +9,11 @@ from funasr import AutoModel
 MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
 
 AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
+AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
+AUDIO_PATH = r"test_2025-07-20-17-54-14.wav"
 OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 VISUALIZE = True                           # Whether to visualize speech activity intervals
-SAVE_SEGMENTS = True                       # Whether to save detected speech segments
+SAVE_SEGMENTS = False                       # Whether to save detected speech segments
 # ================================================================
 
 def ensure_dir(path):
@@ -47,15 +49,48 @@ def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
     for start, end in timestamps:
         ax1.axvspan(start, end, color='green', alpha=0.2)
     
-    # Plot VAD result in the bottom subplot
-    ax2.set_title("VAD Result - Speech Activity Detection")
+    # Calculate mean amplitude using a sliding window
+    window_size = int(sample_rate * 0.02)  # 20ms window
+    stride = max(1, window_size // 2)  # 50% overlap
+    mean_amplitudes = []
+    time_points = []
+    
+    for i in range(0, len(audio_data) - window_size, stride):
+        current_time = i / sample_rate
+        window = audio_data[i:i+window_size]
+        
+        # Check if current window is within any timestamp period
+        is_speech = False
+        for start, end in timestamps:
+            if i >= start and i <= end:
+                is_speech = True
+                break
+        
+        # Only calculate amplitude if in speech segment, otherwise set to 0
+        if is_speech:
+            mean_amplitude = np.mean(np.abs(window))
+        else:
+            mean_amplitude = 0
+            
+        mean_amplitudes.append(mean_amplitude)
+        time_points.append(current_time)
+    
+    # Plot mean amplitude in the bottom subplot
+    ax2.set_title("Mean Amplitude (Speech Segments Only)")
     ax2.set_xlim(0, total_duration)
-    ax2.set_ylim(0, 1)
-    ax2.set_yticks([])
+    ax2.plot(time_points, mean_amplitudes, color='blue', linewidth=1)
+    ax2.set_ylabel("Mean Amplitude")
     ax2.set_xlabel("Time (seconds)")
-
+    
+    # Add speech activity highlighting in the bottom subplot
     for start, end in timestamps:
-        ax2.fill_between([start, end], 0, 1, color="green", alpha=0.6)
+        # 在这里，axvspan 函数用于在底部子图中添加绿色半透明区域
+        # 参数说明：
+        # start, end: 要高亮显示的 x 轴起始和结束位置（这里是时间戳）
+        # color='green': 设置高亮区域的颜色为绿色
+        # alpha=0.2: 设置透明度为 0.2（0 完全透明，1 完全不透明）
+        # 这样可以直观地在图上显示检测到的语音段落
+        ax2.axvspan(start, end, color='green', alpha=0.2)
     
     plt.tight_layout()
     plt.show()
@@ -85,7 +120,7 @@ def main():
     try:
         # Load model and build VAD Inference Session
         print(f"Loading VAD model from: {MODEL_PATH}")
-        vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cpu", disable_update=True)
+        vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True)
         
         # Read audio file
         print(f"Loading audio file: {AUDIO_PATH}")
@@ -129,7 +164,7 @@ def main():
                 start_sample = int(start_sec * sample_rate)
                 end_sample = int(end_sec * sample_rate)
                 seg_path = os.path.join(OUTPUT_DIR, f"segment_{i+1}_{start_sec:.2f}-{end_sec:.2f}.wav")
-                save_audio_segment(audio_data, start_sample, end_sample, sample_rate, seg_path)
+                # save_audio_segment(audio_data, start_sample, end_sample, sample_rate, seg_path)   # not save segment now
         elif not timestamps:
             print("No speech segments detected!")
             
