@@ -15,7 +15,7 @@ USE_LOCAL_MODEL = True  # Change this to switch between local and remote models
 
 # Model Settings
 model_id = "iic/SenseVoiceSmall"                 # Model ID on ModelScope
-model_id = "iic/SenseVoiceSmall-onnx"                 # Model ID on ModelScope
+# model_id = "iic/SenseVoiceSmall-onnx"                 # Model ID on ModelScope NOT registered
 cache_dir = r"C:\Users\212597558\.cache\models"  # Root cache directory for local models
 
 # Input audio file to transcribe
