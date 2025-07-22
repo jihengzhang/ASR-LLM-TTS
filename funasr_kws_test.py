@@ -17,21 +17,22 @@ except ImportError:
 # Path to the audio file for testing
 AUDIO_FILE = "test.wav"  # Replace with your test audio file path
 AUDIO_FILE = "test_hi michael 你好.wav"
-AUDIO_FILE = "test_2025-07-21-06-27-17.wav"
+AUDIO_FILE = "test_2025-07-22-10-41-06.wav"
 # model = "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 # model = "damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # ok after remove space " "
 # model = "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" ############################################## GOOD
 # model = "damo/speech_fsmn_kws_char_zh-cn-16k-common" # not registered
 # model = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # output is singal word 
 model="dengcunqin/speech_seaco_paraformer_large_asr_nat-zh-cantonese-en-16k-common-vocab11666-pytorch" #更换vocab为11666，增加粤语部分字，通过在普通话1w小时、粤语100小时、英语1w小时
+model =  r"iic/SenseVoiceSmall"
 # List of keywords to spot (both English and Chinese)Michael
-KEYWORDS = ["hello", "open", "close", "start", "开始", "小艾", "测试", "现在","Hi Michael","你好 Michael"]
+KEYWORDS = ["hello", "open", "close", "start", "开始", "小艾", "测试", "现在","Hi Michael","你好 Michael","Hi Panda"]
 
 # Initialize the ASR model for keyword detection
 try:
     # Using ASR model for transcription, then we'll search for keywords in the text
     # asr_model = AutoModel(model="damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch", device="cpu")
-    asr_model = AutoModel(model=model, device="cpu")
+    asr_model = AutoModel(model=model, device="cuda:0",autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
     # asr_model = AutoModel(model="sanm_kws", device="cpu") # is not ok need namespce
     print("FunASR ASR model loaded successfully.")
 except Exception as e:
