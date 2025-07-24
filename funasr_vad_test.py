@@ -7,10 +7,11 @@ from funasr import AutoModel
 # ================== Configuration Parameters ==================
 # Local model path
 MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+model_vad = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1.6MB
 
 AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
 AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
-AUDIO_PATH = r"test_2025-07-20-17-54-14.wav"
 OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 VISUALIZE = True                           # Whether to visualize speech activity intervals
 SAVE_SEGMENTS = False                       # Whether to save detected speech segments
@@ -84,12 +85,6 @@ def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
     
     # Add speech activity highlighting in the bottom subplot
     for start, end in timestamps:
-        # 在这里，axvspan 函数用于在底部子图中添加绿色半透明区域
-        # 参数说明：
-        # start, end: 要高亮显示的 x 轴起始和结束位置（这里是时间戳）
-        # color='green': 设置高亮区域的颜色为绿色
-        # alpha=0.2: 设置透明度为 0.2（0 完全透明，1 完全不透明）
-        # 这样可以直观地在图上显示检测到的语音段落
         ax2.axvspan(start, end, color='green', alpha=0.2)
     
     plt.tight_layout()
@@ -120,7 +115,8 @@ def main():
     try:
         # Load model and build VAD Inference Session
         print(f"Loading VAD model from: {MODEL_PATH}")
-        vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True)
+        # vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
+        vad_model = AutoModel(model=model_vad, model_type="vad", device="cuda", disable_update=True)
         
         # Read audio file
         print(f"Loading audio file: {AUDIO_PATH}")
