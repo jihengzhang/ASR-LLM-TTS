@@ -21,7 +21,7 @@ from colorama import Fore, Back, Style
 
 # Initialize colorama for color output support
 colorama.init()
-
+DEBUG = True
 try:
     from funasr import AutoModel
     FUNASR_AVAILABLE = True
@@ -31,7 +31,7 @@ except ImportError:
     print(f"{Fore.RED}[WARNING]{Style.RESET_ALL} FunASR module not found, will use basic amplitude detection")
 
 class KeywordActivatedRecorder:
-    def __init__(self, sample_rate=16000, chunk_size=16000, channels=1, # chunk size 0.1s
+    def __init__(self, sample_rate=16000, chunk_size=1600, channels=1, # chunk size 0.1s
                  format=pyaudio.paInt16, threshold=0.001,
                  silence_duration=2.0, min_speech_duration=1.0,
                  buffer_duration=5.0):
@@ -87,10 +87,14 @@ class KeywordActivatedRecorder:
         
         # FunASR model initialization
         self.vad_model = None
+        self.vad_model_id = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"
+        self.vad_model_path = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+
         self.asr_model = None
+        self.asr_model_id = "paraformer-zh"
         self.use_funasr = FUNASR_AVAILABLE
         
-        if self.use_funasr:
+        if self.use_funasr and not DEBUG:
             self.init_funasr_models()  #load models
         else:
             print(f"{Fore.YELLOW}[INFO]{Style.RESET_ALL} Using basic amplitude detection algorithm")
@@ -99,8 +103,8 @@ class KeywordActivatedRecorder:
         self.keyword_buffer = queue.Queue(maxsize=int(4.0 * sample_rate / chunk_size))  # 4-second keyword buffer
         self.keyword_detected = False
         self.speech_segments = []  # 存储检测到的语音段
-        self.keyword_candidates = ["你好", "小助手", "开始录音", "录音开始", "小爱", "小度"]
-        self.current_keyword = "开始录音"  # 默认关键词
+        self.keyword_candidates = ["你好", "小助手", "开始录音", "录音开始", "小爱", "小度", "小度小度", "小爱同学", "小爱同学开始录音", "小爱同学录音开始", "你好 Michael", "Hi Michael", "Hi Panda"]
+        self.current_keyword = "Hi Panda"  # 默认关键词
         
         # VAD related variables
         self.vad_cache = {}
@@ -114,10 +118,11 @@ class KeywordActivatedRecorder:
         self.min_vad_amplitude = 0.001  # Minimum amplitude to trigger VAD processing
         
         # Setup visualization
+
         self.setup_live_plot()
         
         # Start visualization thread
-        self.start_visualization_thread()
+        # self.start_visualization_thread()
         
         print(f"{Fore.YELLOW}[关键词]{Style.RESET_ALL} 当前激活关键词: '{self.current_keyword}'")
         print(f"{Fore.CYAN}[提示]{Style.RESET_ALL} 使用 FunASR VAD+ASR 进行关键词检测")
@@ -126,25 +131,25 @@ class KeywordActivatedRecorder:
         """Initialize FunASR VAD and ASR models"""
         try:
             # Define local model paths
-            vad_model_path = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
             
             print(f"{Fore.CYAN}[INIT]{Style.RESET_ALL} Loading FunASR VAD model from local path...")
             # Simplest initialization, similar to debug file but with local model path
-            self.vad_model = AutoModel(
-                model=vad_model_path,
-                disable_update=True,
-                model_type="vad"
-            )
-            print(f"{Fore.GREEN}[SUCCESS]{Style.RESET_ALL} FunASR VAD model loaded successfully from {vad_model_path}")
+            # self.vad_model = AutoModel(
+            #     model=self.vad_model_id,
+            #     disable_update=True,
+            #     model_type="vad"
+            # )
+            self.vad_model = AutoModel(model=self.vad_model_id, model_type="vad", device="cuda", disable_update=True)
+            print(f"{Fore.GREEN}[SUCCESS]{Style.RESET_ALL} FunASR VAD model {self.asr_model_id} loaded successfully")
             
             print(f"{Fore.CYAN}[INIT]{Style.RESET_ALL} Loading FunASR ASR model...")
             # Load ASR model for keyword recognition - using same params as debug file
             self.asr_model = AutoModel(
-                model="paraformer-zh",
+                model=self.asr_model_id,
                 disable_update=True,
                 model_revision="v2.0.4"
             )
-            print(f"{Fore.GREEN}[SUCCESS]{Style.RESET_ALL} FunASR ASR model loaded successfully")
+            print(f"{Fore.GREEN}[SUCCESS]{Style.RESET_ALL} FunASR ASR model:{self.asr_model_id} loaded successfully")
             
         except Exception as e:
             print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} FunASR model loading failed: {e}")
@@ -211,7 +216,7 @@ class KeywordActivatedRecorder:
         """Audio callback function to process input audio data"""
         # Convert binary data to array
         audio_data = np.frombuffer(in_data, dtype=np.int16)
-        
+        print("Audio callback called")
         # Debug: Check if we're getting actual audio data
         non_zero_samples = np.count_nonzero(audio_data)
         max_amplitude = np.max(np.abs(audio_data))
@@ -244,7 +249,7 @@ class KeywordActivatedRecorder:
         if self.vad_model is not None:
             try:
                 # Convert binary data to float32 and normalize
-                audio_float = audio_data.astype(np.float32) / 32768.0
+                audio_float = in_data.astype(np.float32) / 32768.0
                 
                 # Add to VAD specific buffer
                 self.audio_buffer_for_vad = np.concatenate([self.audio_buffer_for_vad, audio_float])
@@ -276,11 +281,13 @@ class KeywordActivatedRecorder:
                         
                         try:
                             # Use VAD model for speech detection with matching params to debug file
-                            vad_result = self.vad_model.generate(
-                                input=vad_window  #ok
-                                # input=vad_window.reshape(1, -1),
-                                # chunk_size=400   # Specify chunk size
-                            )
+                            # vad_result = self.vad_model.generate(
+                            #     input=vad_window  #ok
+                            #     # input=vad_window.reshape(1, -1),
+                            #     # chunk_size=400   # Specify chunk size
+                            # )
+                            
+                            vad_result = self.vad_model.generate(vad_window)
                             print(f"\n{Fore.CYAN}[VAD RESULT]{Style.RESET_ALL} Raw VAD result: {vad_result}")
                             
                             # Check VAD result
@@ -295,6 +302,7 @@ class KeywordActivatedRecorder:
                                     if len(vad_segments) > 0:
                                         # Save audio sample with speech
                                         self.save_audio_sample(vad_window, "speech_detected")
+                                        self.recognize_keyword(vad_window)
                                         pass
                                         # Visualize in a separate thread to avoid blocking
                                         # threading.Thread(
@@ -304,47 +312,49 @@ class KeywordActivatedRecorder:
                                         # ).start()
                                     
                                     # If speech segments are detected, process them
-                                    if vad_segments and not self.recording and not self.keyword_detected:
-                                        print(f"\n{Fore.GREEN}[VAD SUCCESS]{Style.RESET_ALL} Processing {len(vad_segments)} speech segments")
+                                    # if vad_segments and not self.recording and not self.keyword_detected:
+                                    #     print(f"\n{Fore.GREEN}[VAD SUCCESS]{Style.RESET_ALL} Processing {len(vad_segments)} speech segments")
+                                    #     self.recognize_keyword(vad_segments)
                                         
                                         # Process each segment
-                                        for i, segment in enumerate(vad_segments):
-                                            if isinstance(segment, (list, tuple)) and len(segment) >= 2:
-                                                start_time, end_time = segment[0], segment[1]
-                                                duration = end_time - start_time
-                                                print(f"\n{Fore.CYAN}[SEGMENT {i+1}]{Style.RESET_ALL} Time: {start_time:.2f}s - {end_time:.2f}s (Duration: {duration:.2f}s)")
+                                        # for i, segment in enumerate(vad_segments):
+                                        #     if isinstance(segment, (list, tuple)) and len(segment) >= 2:
+                                        #         start_time, end_time = segment[0], segment[1]
+                                        #         duration = end_time - start_time
+                                        #         print(f"\n{Fore.CYAN}[SEGMENT {i+1}]{Style.RESET_ALL} Time: {start_time:.2f}s - {end_time:.2f}samples (Duration: {duration * 0.0000625:.2f}samples)")
                                                 
-                                                # Convert time units to sample points
-                                                start_sample = int(start_time * self.sample_rate)
-                                                end_sample = int(end_time * self.sample_rate)
+                                        #         # Convert time units to sample points
+                                        #         start_sample = int(start_time * self.sample_rate)
+                                        #         end_sample = int(end_time * self.sample_rate)
                                                 
-                                                # Check index range
-                                                if start_sample < 0:
-                                                    start_sample = 0
-                                                if end_sample > len(vad_window):
-                                                    end_sample = len(vad_window)
+                                        #         # Check index range
+                                        #         if start_sample < 0:
+                                        #             start_sample = 0
+                                        #         if end_sample > len(vad_window):
+                                        #             end_sample = len(vad_window)
                                                 
-                                                # Extract audio segment and perform keyword recognition
-                                                if end_sample > start_sample:
-                                                    segment_audio = vad_window[start_sample:end_sample]
-                                                    if len(segment_audio) >= 1600:  # At least 100ms
-                                                        print(f"\n{Fore.BLUE}[PROCESSING]{Style.RESET_ALL} Sending segment {i+1} to ASR (length: {len(segment_audio)} samples)")
-                                                        # Use thread for asynchronous keyword recognition
-                                                        # threading.Thread(
-                                                        #     target=self.recognize_keyword,
-                                                        #     args=(segment_audio,),
-                                                        #     daemon=True
-                                                        # ).start()
-                                                        pass
+                                        #         # Extract audio segment and perform keyword recognition
+                                        #         if end_sample > start_sample:
+                                        #             segment_audio = vad_window[start_sample:end_sample]
+                                        #             if len(segment_audio) >= 1600:  # At least 100ms
+                                        #                 print(f"\n{Fore.BLUE}[PROCESSING]{Style.RESET_ALL} Sending segment {i+1} to ASR (length: {len(segment_audio)} samples)")
+                                        #                 # Use thread for asynchronous keyword recognition
+                                        #                 # threading.Thread(
+                                        #                 #     target=self.recognize_keyword,
+                                        #                 #     args=(segment_audio,),
+                                        #                 #     daemon=True
+                                        #                 # ).start()
+                                        #                 self.recognize_keyword(segment_audio)
+                                        #                 pass
                                                         
-                                                        # Check amplitude, if high enough also consider as speech
-                                                        segment_amplitude = np.abs(segment_audio).mean()
-                                                        if segment_amplitude > self.threshold * 1.5:
-                                                            is_speech = True
-                                                    else:
-                                                        print(f"\n{Fore.YELLOW}[SKIP]{Style.RESET_ALL} Segment {i+1} too short: {len(segment_audio)} samples")
-                                            else:
-                                                print(f"\n{Fore.YELLOW}[VAD]{Style.RESET_ALL} Invalid speech segment format: {segment}")
+                                        #                 # Check amplitude, if high enough also consider as speech
+                                        #                 segment_amplitude = np.abs(segment_audio).mean()
+                                        #                 if segment_amplitude > self.threshold * 1.5:
+                                        #                     is_speech = True
+                                        #             else:
+                                        #                 print(f"\n{Fore.YELLOW}[SKIP]{Style.RESET_ALL} Segment {i+1} too short: {len(segment_audio)} samples")
+                                            # else:
+                                                # print(f"\n{Fore.YELLOW}[VAD]{Style.RESET_ALL} Invalid speech segment format: {segment}")
                                     elif not vad_segments:
                                         print(f"\n{Fore.BLUE}[VAD]{Style.RESET_ALL} No speech segments detected in this window")
                                 else:
@@ -521,8 +531,7 @@ class KeywordActivatedRecorder:
             # Use ASR model for speech recognition
             asr_result = self.asr_model.generate(
                 input=audio_input,
-                cache={},
-                language="zh"
+                cache={}
             )
             
             # Parse recognition result
@@ -1094,6 +1103,7 @@ class KeywordActivatedRecorder:
         self.visualization_running = False
     
 if __name__ == "__main__":
+    test_file = "test_music_开始声音测试.wav"
     print(f"\n{Fore.CYAN}{Style.BRIGHT}{'='*60}{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{Style.BRIGHT}           FunASR VAD+ASR Keyword Activated Recording System{Style.RESET_ALL}")
     print(f"{Fore.CYAN}{Style.BRIGHT}{'='*60}{Style.RESET_ALL}")
@@ -1122,136 +1132,83 @@ if __name__ == "__main__":
         
         # Ask the user if they want to test with a WAV file or use the microphone
         # mode = input(f"{Fore.YELLOW}[STARTUP]{Style.RESET_ALL} Choose mode: (1) Test with WAV file, (2) Live microphone: ").strip()
-        mode = 1
+        mode = 0
 
         if mode == 1:
             # Find sample WAV files in the models directory
-            sample_files = []
-            model_dir = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch", "example")
-            if os.path.exists(model_dir):
-                for file in os.listdir(model_dir):
-                    if file.endswith(".wav"):
-                        sample_files.append(os.path.join(model_dir, file))
-            
-            # Also check test directory
-            test_dir = "test"
-            if os.path.exists(test_dir):
-                for file in os.listdir(test_dir):
-                    if file.endswith(".wav"):
-                        sample_files.append(os.path.join(test_dir, file))
-            
-            # User can also provide a custom WAV file
-            if sample_files:
-                print(f"{Fore.CYAN}[SAMPLES]{Style.RESET_ALL} Found {len(sample_files)} sample WAV files:")
-                for i, file in enumerate(sample_files):
-                    print(f"  {i+1}. {file}")
-
-                choice = input(f"{Fore.YELLOW}[SELECT]{Style.RESET_ALL} Choose a sample file (1-{len(sample_files)}) or enter a custom path: ").strip()
+            # sample_files = []
+            # test_file = "test_2025-07-22-10-41-06.wav"        
+            # Open the WAV file
+            with wave.open(test_file, 'rb') as wf:
+                # Check if the WAV file parameters match our expected parameters
+                if wf.getnchannels() != recorder.channels:
+                    print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getnchannels()} channels, expected {recorder.channels}")
                 
-                try:
-                    # Check if the input is a number for sample selection
-                    choice_num = int(choice)
-                    if 1 <= choice_num <= len(sample_files):
-                        test_file = sample_files[choice_num-1]
-                    else:
-                        print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Invalid selection")
-                        test_file = input(f"{Fore.YELLOW}[INPUT]{Style.RESET_ALL} Enter path to a WAV file: ").strip()
-                except ValueError:
-                    # Input is not a number, treat as a custom path
-                    test_file = choice
+                if wf.getsampwidth() != recorder.pyaudio.get_sample_size(recorder.format):
+                    print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getsampwidth()} bytes per sample, expected {recorder.pyaudio.get_sample_size(recorder.format)}")
                 
-                # Validate the test file exists
-                if not os.path.exists(test_file):
-                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} File not found: {test_file}")
-                    test_file = input(f"{Fore.YELLOW}[RETRY]{Style.RESET_ALL} Enter path to a WAV file: ").strip()
+                if wf.getframerate() != recorder.sample_rate:
+                    print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getframerate()} Hz sample rate, expected {recorder.sample_rate}")
                 
-                # Process the test file if it exists
-                if os.path.exists(test_file):
-                    print(f"{Fore.GREEN}[TEST]{Style.RESET_ALL} Loading WAV file: {test_file}")
+                # Get total number of frames
+                n_frames = wf.getnframes()
+                print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} WAV file contains {n_frames} frames ({n_frames/wf.getframerate():.2f} seconds)")
+                
+                # Read data in chunks matching recorder's chunk_size
+                chunk_size = recorder.chunk_size
+                print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} Processing in chunks of {chunk_size} frames")
+                
+                # Create fake time_info dict for audio_callback
+                time_info = {
+                    'input_buffer_adc_time': 0,
+                    'current_time': 0,
+                    'output_buffer_dac_time': 0
+                }
+                
+                # Process the WAV file in chunks
+                frames_processed = 0
+                chunk_count = 0
+                
+                while frames_processed < n_frames:
+                    # Read a chunk of data
+                    data = wf.readframes(chunk_size)
                     
-                    # Open the WAV file
-                    with wave.open(test_file, 'rb') as wf:
-                        # Check if the WAV file parameters match our expected parameters
-                        if wf.getnchannels() != recorder.channels:
-                            print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getnchannels()} channels, expected {recorder.channels}")
-                        
-                        if wf.getsampwidth() != recorder.pyaudio.get_sample_size(recorder.format):
-                            print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getsampwidth()} bytes per sample, expected {recorder.pyaudio.get_sample_size(recorder.format)}")
-                        
-                        if wf.getframerate() != recorder.sample_rate:
-                            print(f"{Fore.YELLOW}[WARNING]{Style.RESET_ALL} WAV file has {wf.getframerate()} Hz sample rate, expected {recorder.sample_rate}")
-                        
-                        # Get total number of frames
-                        n_frames = wf.getnframes()
-                        print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} WAV file contains {n_frames} frames ({n_frames/wf.getframerate():.2f} seconds)")
-                        
-                        # Read data in chunks matching recorder's chunk_size
-                        chunk_size = recorder.chunk_size
-                        print(f"{Fore.CYAN}[INFO]{Style.RESET_ALL} Processing in chunks of {chunk_size} frames")
-                        
-                        # Create fake time_info dict for audio_callback
-                        time_info = {
-                            'input_buffer_adc_time': 0,
-                            'current_time': 0,
-                            'output_buffer_dac_time': 0
-                        }
-                        
-                        # Process the WAV file in chunks
-                        frames_processed = 0
-                        chunk_count = 0
-                        
-                        while frames_processed < n_frames:
-                            # Read a chunk of data
-                            data = wf.readframes(chunk_size)
-                            
-                            if not data:
-                                break
-                            
-                            # Keep track of what we've processed
-                            frames_read = len(data) // (wf.getsampwidth() * wf.getnchannels())
-                            frames_processed += frames_read
-                            chunk_count += 1
-                            
-                            # Update fake time_info
-                            time_info['current_time'] = frames_processed / wf.getframerate()
-                            
-                            print(f"\n{Fore.CYAN}[PROCESSING]{Style.RESET_ALL} Chunk {chunk_count}: {frames_read} frames ({frames_read/wf.getframerate():.3f} sec)")
-                            
-                            # Call the audio_callback method with this chunk
-                            print(f"{Fore.CYAN}[CALLBACK]{Style.RESET_ALL} Calling audio_callback with {len(data)} bytes")
-                            try:
-                                # Match the exact function signature: in_data, frame_count, time_info, status
-                                result = recorder.audio_callback(data, frames_read, time_info, 0)
-                                # print(f"{Fore.GREEN}[CALLBACK RESULT]{Style.RESET_ALL} Returned: {result}")
-                            except Exception as e:
-                                print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Exception in audio_callback: {e}")
-                                import traceback
-                                traceback.print_exc()
-                            
-                            # Add a short pause to allow for visualization updates
-                            time.sleep(0.1)
-                            
-                            # Ask user if they want to continue to the next chunk
-                            # if chunk_count % 5 == 0:  # Every 5 chunks
-                            #     user_input = input(f"{Fore.YELLOW}[INTERACTIVE]{Style.RESET_ALL} Continue to next chunk? (Y/n): ").strip().lower()
-                            #     if user_input == 'n':
-                            #         print(f"{Fore.YELLOW}[ABORT]{Style.RESET_ALL} Test aborted by user")
-                            #         break
-                        
-                        print(f"\n{Fore.GREEN}[COMPLETE]{Style.RESET_ALL} Processed {frames_processed} frames in {chunk_count} chunks")
-                else:
-                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} File not found, falling back to microphone mode")
-                    recorder.start()
-            else:
-                # No sample files found
-                test_file = input(f"{Fore.YELLOW}[INPUT]{Style.RESET_ALL} Enter path to a WAV file: ").strip()
-                if os.path.exists(test_file):
-                    # The processing code would be repeated here, but we'll skip it for brevity
-                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} No sample implementation, falling back to microphone mode")
-                    recorder.start()
-                else:
-                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} File not found, falling back to microphone mode")
-                    recorder.start()
+                    if not data:
+                        break
+                    
+                    # Keep track of what we've processed
+                    frames_read = len(data) // (wf.getsampwidth() * wf.getnchannels())
+                    frames_processed += frames_read
+                    chunk_count += 1
+                    
+                    # Update fake time_info
+                    time_info['current_time'] = frames_processed / wf.getframerate()
+                    
+                    print(f"\n{Fore.CYAN}[PROCESSING]{Style.RESET_ALL} Chunk {chunk_count}: {frames_read} frames ({frames_read/wf.getframerate():.3f} sec)")
+                    
+                    # Call the audio_callback method with this chunk
+                    print(f"{Fore.CYAN}[CALLBACK]{Style.RESET_ALL} Calling audio_callback with {len(data)} bytes")
+                    try:
+                        # Match the exact function signature: in_data, frame_count, time_info, status
+                        result = recorder.audio_callback(data, frames_read, time_info, 0)
+                        # print(f"{Fore.GREEN}[CALLBACK RESULT]{Style.RESET_ALL} Returned: {result}")
+                    except Exception as e:
+                        print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} Exception in audio_callback: {e}")
+                        import traceback
+                        traceback.print_exc()
+                    
+                    # Add a short pause to allow for visualization updates
+                    time.sleep(0.1)
+                    
+                    # Ask user if they want to continue to the next chunk
+                    # if chunk_count % 5 == 0:  # Every 5 chunks
+                    #     user_input = input(f"{Fore.YELLOW}[INTERACTIVE]{Style.RESET_ALL} Continue to next chunk? (Y/n): ").strip().lower()
+                    #     if user_input == 'n':
+                    #         print(f"{Fore.YELLOW}[ABORT]{Style.RESET_ALL} Test aborted by user")
+                    #         break
+                
+                print(f"\n{Fore.GREEN}[COMPLETE]{Style.RESET_ALL} Processed {frames_processed} frames in {chunk_count} chunks")
+
         else:
             # Start in normal microphone mode
             recorder.start()

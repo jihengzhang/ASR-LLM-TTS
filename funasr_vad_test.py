@@ -12,6 +12,7 @@ model_vad = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1
 
 AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
 AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
+AUDIO_PATH = r"test_music_开始声音测试.wav"
 OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 VISUALIZE = True                           # Whether to visualize speech activity intervals
 SAVE_SEGMENTS = False                       # Whether to save detected speech segments

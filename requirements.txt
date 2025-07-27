@@ -1,10 +1,11 @@
-# FunASR VAD 关键词激活录音系统依赖
-
 # 基础依赖
 numpy>=1.20.0
 scipy>=1.8.0
-pyaudio>=0.2.11
 colorama>=0.4.4
+
+# 这个错误 SystemError: PY_SSIZE_T_CLEAN macro must be defined for '#' formats 是由于 Python 3.10 及以上版本在调用某些 C 扩展（如 PyAudio）时，要求在编译时定义 PY_SSIZE_T_CLEAN 宏，否则会报错。
+# 升级 PyAudio# 确保你安装的是最新版本的 PyAudio（推荐 0.2.13 及以上），新版本已修复此兼容性问题。
+pyaudio>=0.2.11  # 0.2.14 is ok No error 
 
 # FunASR 核心依赖
 funasr>=0.8.0
@@ -16,3 +17,7 @@ torchaudio>=2.0.0
 # conda install -y pytorch torchaudio -c pytorch
 # conda install -y colorama
 # pip install funasr pyaudio
+
+matplotlib~=3.10.3
+keyboard~=0.13.5
+soundfile~=0.13.1

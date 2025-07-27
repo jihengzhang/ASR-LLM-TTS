@@ -18,16 +18,16 @@ except ImportError:
 AUDIO_FILE = "test.wav"  # Replace with your test audio file path
 AUDIO_FILE = "test_hi michael 你好.wav"
 AUDIO_FILE = "test_2025-07-22-10-41-06.wav"
+AUDIO_FILE = "test_music_开始声音测试.wav"
 
 # model="dengcunqin/speech_seaco_paraformer_large_asr_nat-zh-cantonese-en-16k-common-vocab11666-pytorch" #更换vocab为11666，增加粤语部分字，通过在普通话1w小时、粤语100小时、英语1w小时
 # model = "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch"
 # model = "damo/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # ok after remove space " "
-model = "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" ############################################## GOOD without timestamp
+# model = "damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" ############################################## GOOD without timestamp
 # model = "damo/speech_fsmn_kws_char_zh-cn-16k-common" # not registered
-# model = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # output is singal word 
-# model =  r"iic/SenseVoiceSmall" # no timestamp
-# model = r"paraformer-zh" # single hanzi with timestamp
-# model =  r"iic/SenseVoice" # no timestamp
+# model = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # output is singal word
+model =  r"iic/SenseVoiceSmall" # no timestamp  'text': '<|zh|><|NEUTRAL|><|BGM|><|woitn|>现在开始声音测试'}]
+# model = r"paraformer-zh" # single hanzi with timestamp  'text': '现 在 开 始 声 音 测 试
 
 # List of keywords to spot (both English and Chinese)Michael
 KEYWORDS = ["hello", "open", "close", "start", "开始", "小艾", "测试", "现在","Hi Michael","你好 Michael","Hi Panda"]
@@ -43,7 +43,9 @@ try:
     # Using ASR model for transcription, then we'll search for keywords in the text
     # asr_model = AutoModel(model="damo/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch", device="cpu")
     # asr_model = AutoModel(model=model, device="cuda:0", output_type="dict", output_format="text_with_timestamp", disable_update=True,autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
-    asr_model = AutoModel(model=model, device="cuda:0", output_type="dict", output_format="text_with_speak_segments", disable_update=True,autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
+    # asr_model = AutoModel(model=model, device="cuda:0", output_type="dict", output_format="text_with_speak_segments", disable_update=True,autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
+    asr_model = AutoModel(model=model, device="cuda:0", output_type="dict", output_format="text_with_timestamp", disable_update=True,autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
+    # asr_model = AutoModel(model=model, device="cuda:0", output_type="dict", output_format="text", disable_update=True,autoupdate=False)  # Use GPU if available, otherwise fallback to CPU
     # asr_model = AutoModel(model="sanm_kws", device="cpu") # is not ok need namespce
     print(f"FunASR ASR model: {model} loaded successfully.")
 except Exception as e:
@@ -68,7 +70,7 @@ try:
         # transcription = text_field.replace(' ', '').lower() if text_field else ""
         transcription = text_field #keep origina format
         print(f"\nTranscription (spaces removed): {transcription}")
-        
+
         # Search for keywords in transcription
         detected_keywords = []
         for keyword in KEYWORDS:
@@ -90,5 +92,6 @@ except Exception as e:
     sys.exit(1)
 
 # The keyword detection logic is now integrated above
+
 
 
