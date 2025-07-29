@@ -27,6 +27,7 @@ AUDIO_FILE = "test_music_开始声音测试.wav"
 # model = "damo/speech_fsmn_kws_char_zh-cn-16k-common" # not registered
 # model = "iic/speech_seaco_paraformer_large_asr_nat-zh-cn-16k-common-vocab8404-pytorch" # output is singal word
 model =  r"iic/SenseVoiceSmall" # no timestamp  'text': '<|zh|><|NEUTRAL|><|BGM|><|woitn|>现在开始声音测试'}]
+model = os.path.join(os.path.expanduser("~"), ".cache", "models", model)
 # model = r"paraformer-zh" # single hanzi with timestamp  'text': '现 在 开 始 声 音 测 试
 
 # List of keywords to spot (both English and Chinese)Michael

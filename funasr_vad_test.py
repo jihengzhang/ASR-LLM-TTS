@@ -3,17 +3,11 @@ import numpy as np
 import soundfile as sf
 import matplotlib.pyplot as plt
 from funasr import AutoModel
-
+import pyaudio
+import re
 # ================== Configuration Parameters ==================
 # Local model path
-MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
-MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
-model_vad = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1.6MB
 
-AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
-AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
-AUDIO_PATH = r"test_music_开始声音测试.wav"
-OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 VISUALIZE = True                           # Whether to visualize speech activity intervals
 SAVE_SEGMENTS = False                       # Whether to save detected speech segments
 # ================================================================
@@ -36,20 +30,29 @@ def load_audio(path):
         audio_data = audio_data[:, 0]  # Only use the first channel
     return audio_data, sample_rate
 
-def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
-    """Visualize speech activity intervals with audio waveform"""
+def plot_vad_result(audio_data, sample_rate, vad_timestamps, total_duration, kws_results=None):
+    # 设置matplotlib支持中文
+    import matplotlib
+    matplotlib.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']  # 任选其一
+    matplotlib.rcParams['axes.unicode_minus'] = False
+
+    """Visualize speech activity intervals with audio waveform and KWS results"""
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 6), gridspec_kw={'height_ratios': [3, 1]})
     
     # Plot audio waveform in the top subplot
     time_axis = np.linspace(0, total_duration, len(audio_data))
+    if isinstance(audio_data, bytes):
+        # audio_data = audio_data.astype(np.float32) #'bytes' object has no attribute 'astype'
+        audio_data = np.frombuffer(audio_data, dtype=np.float32)
     ax1.plot(time_axis, audio_data, color='blue', linewidth=0.5)
     ax1.set_title("Audio Waveform")
     ax1.set_xlim(0, total_duration)
     ax1.set_ylabel("Amplitude")
     
     # Highlight speech segments in the waveform
-    for start, end in timestamps:
+    for start, end in vad_timestamps:
         ax1.axvspan(start, end, color='green', alpha=0.2)
+    # 显示KWS识别结果（上方不再显示）
     
     # Calculate mean amplitude using a sliding window
     window_size = int(sample_rate * 0.02)  # 20ms window
@@ -63,14 +66,14 @@ def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
         
         # Check if current window is within any timestamp period
         is_speech = False
-        for start, end in timestamps:
+        for start, end in vad_timestamps:
             if i >= start and i <= end:
                 is_speech = True
                 break
         
         # Only calculate amplitude if in speech segment, otherwise set to 0
         if is_speech:
-            mean_amplitude = np.mean(np.abs(window))
+            mean_amplitude = np.max(np.abs(window))
         else:
             mean_amplitude = 0
             
@@ -85,11 +88,30 @@ def plot_vad_result(audio_data, sample_rate, timestamps, total_duration):
     ax2.set_xlabel("Time (seconds)")
     
     # Add speech activity highlighting in the bottom subplot
-    for start, end in timestamps:
+    for start, end in vad_timestamps:
         ax2.axvspan(start, end, color='green', alpha=0.2)
+    # 在下方显示KWS识别点，y坐标不要太靠下
+    if kws_results:
+        for kws_time, kws_word in kws_results:
+            # 采样点转为秒，确保和波形对齐
+            kws_time_sec = kws_time / sample_rate
+            ax2.axvline(kws_time_sec, color='red', linestyle='--', alpha=0.7)
+            y_base = max(mean_amplitudes) if mean_amplitudes else 1.0
+            y_offset = y_base * 0.7  # 0.7倍最大值，避免太靠下
+            ax2.text(
+                kws_time_sec,
+                y_offset,
+                kws_word,
+                color='red',
+                rotation=0,
+                horizontalalignment='center',
+                verticalalignment='bottom',
+                fontsize=10,
+                clip_on=True
+            )
     
     plt.tight_layout()
-    plt.show()
+    plt.show(block=True)
 
 def validate_audio(audio_data, sample_rate):
     """Validate audio data for VAD processing"""
@@ -113,47 +135,251 @@ def validate_audio(audio_data, sample_rate):
     return audio_data
 
 def main():
+    """
+    0: use soundfile to read audio file, return float64, normalized
+    1: use wave to read audio file, convert to int16, NOT normalized
+    2: use wave to read audio file, convert to float32, normalized
+    """
+    MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    MODEL_PATH = os.path.join("C:\\Users\\212597558\\.cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    MODEL_PATH = os.path.join(os.path.expanduser("~"), ".cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    model_vad_id = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1.6MB
+
+    AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
+    AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
+    AUDIO_PATH = r"test_music_开始声音测试.wav"
+    AUDIO_PATH = r"test.wav"
+    OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
+
+    vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
+    # vad_model = AutoModel(model=model_vad, model_type="vad", device="cuda", disable_update=True)
+    kws_model_id =  r"iic\\SenseVoiceSmall"
+    kws_model_path = os.path.join(os.path.expanduser("~"), ".cache\\models", kws_model_id)        
+    kws_model = AutoModel(model=kws_model_path, model_type="kws", device="cuda:0", disable_update=True)
+
+    method = 1
+    method = "kws0"
     try:
         # Load model and build VAD Inference Session
         print(f"Loading VAD model from: {MODEL_PATH}")
-        # vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
-        vad_model = AutoModel(model=model_vad, model_type="vad", device="cuda", disable_update=True)
-        
+
         # Read audio file
-        print(f"Loading audio file: {AUDIO_PATH}")
-        audio_data, sample_rate = load_audio(AUDIO_PATH)
-        duration = len(audio_data) / sample_rate
-        print(f"Audio loaded: {duration:.2f}s at {sample_rate}Hz")
+        if method == 0: # Audio data as int 64 float, normalized
+            print(f"Loading audio file: {AUDIO_PATH}")
+            # audio_data, sample_rate = load_audio(AUDIO_PATH)
+            audio_data, sample_rate = sf.read(AUDIO_PATH)
+            if len(audio_data.shape) > 1:
+                audio_data = audio_data[:, 0]  # Only use the first channel
+            duration = len(audio_data) / sample_rate
+            print(f"Audio loaded: {duration:.2f}s at {sample_rate}Hz")
         
-        # Print audio statistics for debugging
-        print(f"Audio statistics: min={audio_data.min():.4f}, max={audio_data.max():.4f}, mean={audio_data.mean():.4f}")
-        print(f"Non-zero samples: {np.count_nonzero(audio_data)}/{len(audio_data)} ({np.count_nonzero(audio_data)/len(audio_data)*100:.2f}%)")
+            # Print audio statistics for debugging
+            print(f"Audio statistics: min={audio_data.min():.4f}, max={audio_data.max():.4f}, mean={audio_data.mean():.4f}")
+            print(f"Non-zero samples: {np.count_nonzero(audio_data)}/{len(audio_data)} ({np.count_nonzero(audio_data)/len(audio_data)*100:.2f}%)")
 
-        # Validate audio data
-        audio_data = validate_audio(audio_data, sample_rate)
-
-        # Execute VAD inference using the generate method
-        print("Running VAD inference...")
-        result = vad_model.generate(audio_data)
-        
-        # Print raw result for debugging
-        print("Raw VAD result:", result)
-        
+            result = vad_model.generate(audio_data) 
         # Extract timestamps from the result format
-        timestamps = []
-        if result and isinstance(result, list) and len(result) > 0:
-            # Check if there's any detected segments
-            if 'value' in result[0] and result[0]['value']:
-                timestamps = result[0]['value']
-            else:
-                print("No speech segments detected in the result")
-        
-        print("Speech intervals:", timestamps)
+            timestamps = []
+            if result and isinstance(result, list) and len(result) > 0:
+                # Check if there's any detected segments
+                if 'value' in result[0] and result[0]['value']:
+                    timestamps = result[0]['value']
+                else:
+                    print("No speech segments detected in the result")
+            
+            print("Speech intervals:", timestamps)
 
-        # Draw plot showing speech activity intervals
-        if VISUALIZE:
-            plot_vad_result(audio_data, sample_rate, timestamps, duration)
+            # Draw plot showing speech activity intervals
+            if VISUALIZE:
+                plot_vad_result(audio_data, sample_rate, timestamps, duration)
 
+        elif method == 1: # use wave to read audio file, int 16 or byte, Non-normalized
+            # Simulate live input from audio file
+            import wave
+            wf = wave.open(AUDIO_PATH, 'rb')
+            chunk = 6400
+            sample_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            print(f"Simulating live input from {AUDIO_PATH}...")
+
+            all_audio = []
+            all_timestamps = []
+            total_samples = 0
+
+            while True:
+                audio_data = wf.readframes(chunk)
+                if not audio_data:
+                    break
+                audio_data = np.frombuffer(audio_data, dtype=np.int16)
+                if n_channels == 2:
+                    audio_data = audio_data.reshape(-1, 2)
+                    audio_data = audio_data[:, 0]
+                # 累积音频数据
+                all_audio.append(audio_data)
+                duration = len(audio_data) / sample_rate / n_channels
+                # VAD 推理
+                result = vad_model.generate(audio_data)
+                # 累积时间戳（修正为全局时间）
+                if result and isinstance(result, list) and len(result) > 0:
+                    if 'value' in result[0] and result[0]['value']:
+                        # 将 chunk 内的时间戳转换为全局时间戳
+                        for seg in result[0]['value']:
+                            start, end = seg
+                            global_start = start + total_samples
+                            global_end = end + total_samples
+                            all_timestamps.append((global_start, global_end))
+                    else:
+                        print("No speech segments detected in the result")
+                total_samples += len(audio_data)
+                print("Speech intervals:", result[0]['value'] if result and isinstance(result, list) and len(result) > 0 and 'value' in result[0] else [])
+
+            # 合并所有音频数据
+            all_audio_data = np.concatenate(all_audio) if all_audio else np.array([])
+            total_duration = len(all_audio_data) / sample_rate / n_channels
+
+            # merged_timestamps = merge_intervals(all_timestamps)
+
+            if VISUALIZE and len(all_audio_data) > 0:
+                plot_vad_result(all_audio_data, sample_rate, all_timestamps, total_duration)
+
+        elif method == 2:  # Simulate live input from audio file, float32, normalized
+            import wave
+            wf = wave.open(AUDIO_PATH, 'rb')
+            chunk = 1600
+            sample_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            print(f"Simulating live input from {AUDIO_PATH}...")
+
+            all_audio = []
+            all_timestamps = []
+            total_samples = 0
+
+            while True:
+                audio_data = wf.readframes(chunk)
+                if not audio_data:
+                    break
+                audio_data = np.frombuffer(audio_data, dtype=np.int16)
+                if n_channels == 2:
+                    audio_data = audio_data.reshape(-1, 2)
+                    audio_data = audio_data[:, 0]
+                audio_data_norm = audio_data.astype(np.float32) / 32768.0
+                all_audio.append(audio_data_norm)
+                duration = len(audio_data_norm) / sample_rate
+                result = vad_model.generate(audio_data_norm)
+                if result and isinstance(result, list) and len(result) > 0:
+                    if 'value' in result[0] and result[0]['value']:
+                        for seg in result[0]['value']:
+                            start, end = seg
+                            global_start = start + total_samples / sample_rate
+                            global_end = end + total_samples / sample_rate
+                            all_timestamps.append((global_start, global_end))
+                    else:
+                        print("No speech segments detected in the result")
+                total_samples += len(audio_data_norm)
+                print("Speech intervals:", result[0]['value'] if result and isinstance(result, list) and len(result) > 0 and 'value' in result[0] else [])
+
+            all_audio_data = np.concatenate(all_audio) if all_audio else np.array([])
+            total_duration = len(all_audio_data) / sample_rate
+
+            def merge_intervals(intervals):
+                if not intervals:
+                    return []
+                intervals.sort()
+                merged = [intervals[0]]
+                for current in intervals[1:]:
+                    prev = merged[-1]
+                    if current[0] <= prev[1]:
+                        merged[-1] = (prev[0], max(prev[1], current[1]))
+                    else:
+                        merged.append(current)
+                return merged
+            merged_timestamps = merge_intervals(all_timestamps)
+
+            if VISUALIZE and len(all_audio_data) > 0:
+                plot_vad_result(all_audio_data, sample_rate, merged_timestamps, total_duration)
+
+        elif method == "kws0": # use wave to read audio file, int 16 or byte, Non-normalized
+            # Simulate live input from audio file
+
+            import wave
+            wf = wave.open(AUDIO_PATH, 'rb')
+            chunk = 32000
+            sample_rate = wf.getframerate()
+            n_channels = wf.getnchannels()
+            print(f"Simulating live input from {AUDIO_PATH}...")
+
+            all_audio = []
+            vad_timestamps = []
+            kws_results = []
+            total_samples = 0
+
+            # 滑动窗口参数
+            kws_chunk = chunk
+            kws_stride = chunk // 2  # 50%重叠
+            kws_buffer = np.array([], dtype=np.int16)
+            kws_last_word_sample = {}   # word: last_sample_index
+
+            while True:
+                audio_data = wf.readframes(chunk)
+                if not audio_data:
+                    break
+                audio_data = np.frombuffer(audio_data, dtype=np.int16)
+                if n_channels == 2:
+                    audio_data = audio_data.reshape(-1, 2)
+                    audio_data = audio_data[:, 0]
+                # 累积音频数据
+                all_audio.append(audio_data)
+                duration = len(audio_data) / sample_rate / n_channels
+                # VAD 推理
+                result = vad_model.generate(audio_data)
+                # 只保存VAD时间戳
+                if result and isinstance(result, list) and len(result) > 0:
+                    if 'value' in result[0] and result[0]['value']:
+                        for seg in result[0]['value']:
+                            start, end = seg
+                            global_start = start + total_samples
+                            global_end = end + total_samples
+                            vad_timestamps.append((global_start, global_end))
+                    else:
+                        print("No speech segments detected in the result")
+                # KWS 滑动窗口推理
+                kws_buffer = np.concatenate([kws_buffer, audio_data])
+                buffer_len = len(kws_buffer)
+                slide_pos = 0
+                while slide_pos + kws_chunk <= buffer_len:
+                    chunk_data = kws_buffer[slide_pos:slide_pos + kws_chunk]
+                    audio_data_float = chunk_data.astype(np.float32) / 32768.0
+                    kws_result = kws_model.generate(audio_data_float)
+                    if kws_result and isinstance(kws_result, list):
+                        for item in kws_result:
+                            if 'text' in item or 'timestamp' in item:
+                                ts = item['timestamp'] if ('timestamp' in item and item['timestamp'] is not None) else 0
+                                # 采样点为单位
+                                kws_sample = int(ts + (total_samples - buffer_len + slide_pos))
+                                kws_word = item['text'] if 'text' in item else ''
+                                kws_word = re.sub(r"<\|.*?\|>", "", kws_word)
+                                # 去除滑窗重复：同一关键词在相邻窗口只保留一次（如采样点差大于16000才保留，约1秒）
+                                if len(kws_word) > 0:
+                                    last_sample = kws_last_word_sample.get(kws_word, -99999999)
+                                    if abs(kws_sample - last_sample) > 16000:
+                                        kws_results.append((kws_sample, kws_word))
+                                        kws_last_word_sample[kws_word] = kws_sample
+                    slide_pos += kws_stride
+                # 保留未处理的尾部
+                if slide_pos < buffer_len:
+                    kws_buffer = kws_buffer[slide_pos:]
+                else:
+                    kws_buffer = np.array([], dtype=np.int16)
+                total_samples += len(audio_data)
+                print("Speech intervals:", result[0]['value'] if result and isinstance(result, list) and len(result) > 0 and 'value' in result[0] else [])
+                if kws_result:
+                    print("KWS result:", kws_result)
+
+            all_audio_data = np.concatenate(all_audio) if all_audio else np.array([])
+            total_duration = len(all_audio_data) / sample_rate / n_channels
+
+            if VISUALIZE and len(all_audio_data) > 0:
+                plot_vad_result(all_audio_data, sample_rate, vad_timestamps, total_duration, kws_results=kws_results)
         # Save speech segments as separate files
         if SAVE_SEGMENTS and timestamps:
             ensure_dir(OUTPUT_DIR)
@@ -164,9 +390,11 @@ def main():
                 # save_audio_segment(audio_data, start_sample, end_sample, sample_rate, seg_path)   # not save segment now
         elif not timestamps:
             print("No speech segments detected!")
-            
+
+        pass
+
     except Exception as e:
-        print(f"Error in VAD processing: {e}")
+        print(f"Error in VAD/KWS processing: {e}")
         import traceback
         traceback.print_exc()
 

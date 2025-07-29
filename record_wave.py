@@ -221,7 +221,7 @@ def main():
         recorder = SimpleWaveRecorder(
             sample_rate=16000,
             chunk_size=1024,
-            channels=1,
+            channels=2,
             format=pyaudio.paInt16
         )
         

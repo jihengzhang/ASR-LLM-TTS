@@ -48,6 +48,26 @@ except ImportError:
 DEBUG = True
 
 class VADKWSProcessor:
+    # def play_wav_file(self, wav_path):
+    #     """Play a wav file using PyAudio for debug/simulation"""
+    #     import wave
+    #     wf = wave.open(wav_path, 'rb')
+    #     stream = self.pyaudio.open(
+    #         format=self.pyaudio.get_format_from_width(wf.getsampwidth()),
+    #         channels=wf.getnchannels(),
+    #         rate=wf.getframerate(),
+    #         output=True
+    #     )
+    #     chunk = 1024
+    #     data = wf.readframes(chunk)
+    #     print(f"Playing {wav_path}...")
+    #     while data:
+    #         stream.write(data)
+    #         data = wf.readframes(chunk)
+    #     stream.stop_stream()
+    #     stream.close()
+    #     wf.close()
+    #     print(f"Finished playing {wav_path}")
     """
     Real-time Voice Activity Detection and Keyword Spotting with visualization
     """
@@ -70,6 +90,7 @@ class VADKWSProcessor:
             keywords: List of keywords to detect (default: None)
         """
         # Audio parameters
+        self.isDebug = False
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.channels = channels
@@ -182,22 +203,22 @@ class VADKWSProcessor:
         
         try:
             # Open audio stream
-            self.stream = self.pyaudio.open(
-                format=self.format,
-                channels=self.channels,
-                rate=self.sample_rate,
-                input=True,
-                frames_per_buffer=self.chunk_size,
-                input_device_index=self.input_device_index,
-                stream_callback=self.audio_callback
-            )
-            self.stream.start_stream()
-            print(f"Voice activation system started, waiting for speech...")
+            if not __name__ == "__main__":                
+                self.stream = self.pyaudio.open(
+                    format=self.format,
+                    channels=self.channels,
+                    rate=self.sample_rate,
+                    input=True,
+                    frames_per_buffer=self.chunk_size,
+                    input_device_index=self.input_device_index,
+                    stream_callback=self.audio_callback
+                )
+                self.stream.start_stream()
+                print(f"Voice activation system started, waiting for speech...")
             
-            # Start processing threads
-            thread_names = ['AudioInput', 'VADProcessing', 'KWSProcessing', 'Plotting']
-            thread_targets = [self.audio_input_thread, self.vad_processing_thread, 
-                            self.kws_processing_thread, self.plotting_thread]
+            # Start processing threads (excluding deprecated audio_input_thread)
+            thread_names = ['VADProcessing', 'KWSProcessing', 'Plotting']
+            thread_targets = [self.vad_processing_thread, self.kws_processing_thread, self.plotting_thread]
             
             for i, (name, target) in enumerate(zip(thread_names, thread_targets)):
                 thread = threading.Thread(target=target, name=name, daemon=True)
@@ -272,7 +293,8 @@ class VADKWSProcessor:
 
             # Put in queue for processing (raw int16 for VAD/KWS)
             try:
-                self.audio_data_queue.put_nowait((audio_data, time.time()))
+                # self.audio_data_queue.put_nowait((audio_data, time.time()))
+                self.audio_data_queue.put_nowait((in_data, time.time()))
             except queue.Full:
                 pass  # Drop data if queue is full
         except Exception as e:
@@ -280,18 +302,6 @@ class VADKWSProcessor:
             traceback.print_exc()
 
         return (None, pyaudio.paContinue)
-    
-    def audio_input_thread(self):
-        """Thread for handling audio input"""
-        print("Audio input thread started")
-        
-        while not self.stop_event.is_set():
-            try:
-                # Keep the stream alive
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"Error in audio input thread: {e}")
-                traceback.print_exc()
     
     def plotting_thread(self):
         """Thread for handling plot updates - deprecated due to matplotlib threading issues"""
@@ -491,7 +501,7 @@ class VADKWSProcessor:
         """Thread for processing VAD"""
         print("VAD processing thread started")
         
-        while not self.stop_event.is_set():
+        while not self.stop_event.is_set() :
             try:
                 # Get audio data from queue with timeout
                 try:
@@ -515,13 +525,13 @@ class VADKWSProcessor:
                         if valid_length > 0:
                             valid_audio = audio_data[:valid_length]
                             # Convert numpy array to bytes to avoid PY_SSIZE_T_CLEAN error
-                            if hasattr(valid_audio, 'tobytes'):
-                                valid_audio_bytes = valid_audio.tobytes()
-                            else:
-                                valid_audio_bytes = bytes(valid_audio)
+                            # if hasattr(valid_audio, 'tobytes'):
+                            #     valid_audio_bytes = valid_audio.tobytes()
+                            # else:
+                            #     valid_audio_bytes = bytes(valid_audio)
                             # Process with VAD model
                             vad_result = self.vad_model.generate(
-                                input=valid_audio_bytes,
+                                input=valid_audio,
                                 model_type="vad",
                                 output_type="dict"
                             )
@@ -591,18 +601,24 @@ class VADKWSProcessor:
             except Exception as e:
                 print(f"Error in VAD thread: {e}")
                 traceback.print_exc()
+        
+            if self.isDebug:
+                break  # Debug mode: exit after one iteration
 
     def kws_processing_thread(self):
         """Thread for processing Keyword Spotting"""
         print("KWS processing thread started")
         
-        while not self.stop_event.is_set():
+        while not self.stop_event.is_set() :
             try:
                 # Get audio data from VAD queue with timeout
                 try:
                     audio_data, timestamp, vad_segments = self.vad_result_queue.get(timeout=0.1)
                 except queue.Empty:
-                    continue
+                    if self.isDebug:
+                        break
+                    else:
+                        continue
                 
                 # Skip if keyword already detected
                 with self.lock:
@@ -663,29 +679,58 @@ class VADKWSProcessor:
             except Exception as e:
                 print(f"Error in KWS thread: {e}")
                 traceback.print_exc()
+            
+            if self.isDebug:
+                break  # Debug mode: exit after one iteration
 
 def main():
     """Main function to run the VAD/KWS processor"""
     # Initialize processor with default parameters
     processor = VADKWSProcessor(
         sample_rate=16000,
-        chunk_size=1600,
+        chunk_size=8000,
         threshold=0.01,
         silence_duration=2.0,
         buffer_duration=3.0,
         keywords=["hello", "computer", "system"]
     )
-    
+    processor.isDebug = True
     processor_started = False
     try:
-        # Start the processor
+        # Debug: simulate live input from test.wav start threads firstly to prepare to receive data
+        
+        import os
+        test_wav_path = os.path.join(os.path.dirname(__file__), "test.wav")
+        if os.path.exists(test_wav_path):
+            import wave
+            wf = wave.open(test_wav_path, 'rb')
+            chunk = processor.chunk_size
+            print(f"Simulating live input from {test_wav_path}...")
+            while True:
+                data = wf.readframes(chunk)
+                if not data:
+                    break
+                # Simulate PyAudio callback
+                processor.audio_callback(data, chunk, None, None) #put data into audio_data_queue
+                # Call VAD and KWS processing threads directly for simulation
+
+                vad_result = processor.vad_model.generate(
+                    input=data,
+                    model_type="vad",
+                    output_type="dict"
+                )
+
+                processor.vad_processing_thread()  # Process VAD
+                processor.kws_processing_thread()  # Process the audio data
+                # Optionally, sleep to simulate real-time
+                time.sleep(chunk / processor.sample_rate)
+            wf.close()
+            print(f"Finished simulating {test_wav_path}")
+        # Start the processor (for real mic input)
         processor.start()
         processor_started = True
-        
-        # Show the plot window in the main thread (this is the key fix)
         print("Showing plot window. Close the window to exit.")
         plt.show()  # This runs the matplotlib event loop in the main thread
-        
     except KeyboardInterrupt:
         print("\nStopping...")
     except Exception as e:
