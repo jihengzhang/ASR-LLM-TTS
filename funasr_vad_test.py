@@ -98,13 +98,14 @@ def plot_vad_result(audio_data, sample_rate, vad_timestamps, total_duration, kws
             ax2.axvline(kws_time_sec, color='red', linestyle='--', alpha=0.7)
             y_base = max(mean_amplitudes) if mean_amplitudes else 1.0
             y_offset = y_base * 0.7  # 0.7倍最大值，避免太靠下
+            # 关键字与竖线左对齐，略微右移避免重叠
             ax2.text(
-                kws_time_sec,
+                kws_time_sec + 0.01,  # 右移0.01秒
                 y_offset,
                 kws_word,
                 color='red',
                 rotation=0,
-                horizontalalignment='center',
+                horizontalalignment='left',  # 右对齐
                 verticalalignment='bottom',
                 fontsize=10,
                 clip_on=True
@@ -303,8 +304,8 @@ def main():
 
             import wave
             wf = wave.open(AUDIO_PATH, 'rb')
-            chunk = 32000
             sample_rate = wf.getframerate()
+            chunk = 6 * sample_rate
             n_channels = wf.getnchannels()
             print(f"Simulating live input from {AUDIO_PATH}...")
 
@@ -315,9 +316,12 @@ def main():
 
             # 滑动窗口参数
             kws_chunk = chunk
-            kws_stride = chunk // 2  # 50%重叠
+            min_chunk = 1 * sample_rate  # 最小窗口长度
+            max_chunk = 5 * sample_rate  # 最大窗口长度
             kws_buffer = np.array([], dtype=np.int16)
             kws_last_word_sample = {}   # word: last_sample_index
+            amplitude_threshold = 100   # 静音阈值（可根据实际调整）
+            window_size = 8000  # 窗口大小（可根据实际调整）
 
             while True:
                 audio_data = wf.readframes(chunk)
@@ -331,31 +335,62 @@ def main():
                 all_audio.append(audio_data)
                 duration = len(audio_data) / sample_rate / n_channels
                 # VAD 推理
-                result = vad_model.generate(audio_data)
-                # 只保存VAD时间戳
-                if result and isinstance(result, list) and len(result) > 0:
-                    if 'value' in result[0] and result[0]['value']:
-                        for seg in result[0]['value']:
-                            start, end = seg
-                            global_start = start + total_samples
-                            global_end = end + total_samples
-                            vad_timestamps.append((global_start, global_end))
-                    else:
-                        print("No speech segments detected in the result")
-                # KWS 滑动窗口推理
+
+                # KWS 自适应边界滑动窗口推理
                 kws_buffer = np.concatenate([kws_buffer, audio_data])
                 buffer_len = len(kws_buffer)
-                slide_pos = 0
-                while slide_pos + kws_chunk <= buffer_len:
-                    chunk_data = kws_buffer[slide_pos:slide_pos + kws_chunk]
+                start_pos = 0
+                # 记录本chunk的起始采样点
+                chunk_start_sample = total_samples
+                while start_pos + min_chunk <= buffer_len:
+                    # 判断起始点电平
+                    start_window = kws_buffer[start_pos : start_pos + window_size]
+                    if start_window.size < window_size:
+                        break  # 剩余数据不足一个窗口
+                    start_mean = np.mean(np.abs(start_window))
+                    if start_mean < amplitude_threshold:
+                        # 电平低于阈值，跳过，向后滑动
+                        start_pos += window_size
+                        continue
+
+                    # 在[min_chunk, max_chunk]范围内寻找幅值均值小于阈值的点（窗口为window_size）
+                    search_start = start_pos + min_chunk
+                    search_end = min(start_pos + max_chunk, buffer_len)
+                    boundary = None
+                    for i in range(search_start, search_end, window_size):
+                        window_end = min(i + window_size, search_end)
+                        window = kws_buffer[i:window_end]
+                        if window.size == 0:
+                            continue
+                        mean_amp = np.mean(np.abs(window))
+                        if mean_amp < amplitude_threshold:
+                            boundary = window_end
+                            break
+                    if boundary is None:
+                        # 没有找到静音点，强制用max_chunk
+                        boundary = min(start_pos + max_chunk, buffer_len)
+                    chunk_data = kws_buffer[start_pos:boundary]
+                    if len(chunk_data) < min_chunk:
+                        break  # 剩余数据太短，等待下次补齐
                     audio_data_float = chunk_data.astype(np.float32) / 32768.0
                     kws_result = kws_model.generate(audio_data_float)
+                    vad_result = vad_model.generate(audio_data_float)
+                    # 只保存VAD时间戳
+                    if vad_result and isinstance(vad_result, list) and len(vad_result) > 0:
+                        if 'value' in vad_result[0] and vad_result[0]['value']:
+                            for seg in vad_result[0]['value']:
+                                start, end = seg
+                                global_start = start + total_samples
+                                global_end = end + total_samples
+                                vad_timestamps.append((global_start, global_end))
+                        else:
+                            print("No speech segments detected in the result")
                     if kws_result and isinstance(kws_result, list):
                         for item in kws_result:
                             if 'text' in item or 'timestamp' in item:
-                                ts = item['timestamp'] if ('timestamp' in item and item['timestamp'] is not None) else 0
-                                # 采样点为单位
-                                kws_sample = int(ts + (total_samples - buffer_len + slide_pos))
+                                ts = item['timestamp'] if ('timestamp' in item and item['timestamp'] is not None) else start
+                                # 采样点为单位，需加上本chunk的起始采样点和窗口内偏移
+                                kws_sample = int(ts + chunk_start_sample + start_pos)
                                 kws_word = item['text'] if 'text' in item else ''
                                 kws_word = re.sub(r"<\|.*?\|>", "", kws_word)
                                 # 去除滑窗重复：同一关键词在相邻窗口只保留一次（如采样点差大于16000才保留，约1秒）
@@ -364,14 +399,13 @@ def main():
                                     if abs(kws_sample - last_sample) > 16000:
                                         kws_results.append((kws_sample, kws_word))
                                         kws_last_word_sample[kws_word] = kws_sample
-                    slide_pos += kws_stride
+                    start_pos = boundary
                 # 保留未处理的尾部
-                if slide_pos < buffer_len:
-                    kws_buffer = kws_buffer[slide_pos:]
+                if start_pos < buffer_len:
+                    kws_buffer = kws_buffer[start_pos:]
                 else:
                     kws_buffer = np.array([], dtype=np.int16)
                 total_samples += len(audio_data)
-                print("Speech intervals:", result[0]['value'] if result and isinstance(result, list) and len(result) > 0 and 'value' in result[0] else [])
                 if kws_result:
                     print("KWS result:", kws_result)
 
