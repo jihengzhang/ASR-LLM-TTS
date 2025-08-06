@@ -23,9 +23,9 @@ def run_processor_ui():
         sample_rate=16000,
         chunk_size=1600,
         threshold=0.01,
-        silence_duration=2.0,
+        silence_duration=3.0,
         buffer_duration=3.0,
-        keywords=["hello", "computer", "system"]
+        keywords=["hello panda", "Hi panda", "你好 panda"]
     )
     processor_started = False
 
@@ -49,7 +49,7 @@ def run_processor_ui():
 
     root = tk.Tk()
     root.title("Audio Test UI - FunASR VAD/KWS")
-    root.geometry("1920x1080")
+    root.geometry("1280x800")
 
     # Use grid layout for auto-resizing
     root.grid_rowconfigure(1, weight=8)  # plot row
@@ -63,13 +63,13 @@ def run_processor_ui():
     top_frame.grid_columnconfigure(1, weight=1)
     top_frame.grid_columnconfigure(2, weight=1)
 
-    start_btn = tk.Button(top_frame, text="Start VAD/KWS Processor", command=start_processor, width=12, height=1)
+    start_btn = tk.Button(top_frame, text="Start VAD/KWS Processor", command=start_processor, width=8, height=1)
     start_btn.grid(row=0, column=0, padx=10, sticky="ew")
 
-    stop_btn = tk.Button(top_frame, text="Stop Processor", command=stop_processor, width=12, height=1)
+    stop_btn = tk.Button(top_frame, text="Stop Processor", command=stop_processor, width=8, height=1)
     stop_btn.grid(row=0, column=1, padx=10, sticky="ew")
 
-    quit_btn = tk.Button(top_frame, text="Quit", command=root.quit, width=12, height=1)
+    quit_btn = tk.Button(top_frame, text="Quit", command=root.quit, width=8, height=1)
     quit_btn.grid(row=0, column=2, padx=10, sticky="ew")
 
     # Frame for matplotlib plot
@@ -112,7 +112,7 @@ def run_processor_ui():
             for kw, ts in processor.detected_keywords[-10:]:
                 result_text.insert(tk.END, f"{ts.strftime('%H:%M:%S')}: {kw}\n")
             result_text.config(state=tk.DISABLED)
-        root.after(1000, update_results)  # Update every second
+        root.after(500, update_results)  # Update every 500ms
 
     update_results()  # Start updating results at startup
 
