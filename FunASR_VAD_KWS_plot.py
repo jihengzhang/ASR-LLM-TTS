@@ -19,7 +19,7 @@ if not hasattr(sys, 'setdlopenflags'):
     if hasattr(os, 'add_dll_directory'):
         # Windows specific DLL loading
         os.add_dll_directory(os.getcwd())
-
+print("Import libraries...")
 import os
 import time
 import wave
@@ -41,6 +41,23 @@ from scipy import signal
 try:
     from funasr import AutoModel
     FUNASR_AVAILABLE = True
+    MODEL_PATH = os.path.join("models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    MODEL_PATH = os.path.join("C:\\Users\\212597558\\.cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    MODEL_PATH = os.path.join(os.path.expanduser("~"), ".cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
+    model_vad_id = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1.6MB
+
+    AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
+    AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
+    AUDIO_PATH = r"test_music_开始声音测试.wav"
+    # AUDIO_PATH = r"test.wav"
+    OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
+
+    vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
+    # vad_model = AutoModel(model=model_vad, model_type="vad", device="cuda", disable_update=True)
+    kws_model_id =  r"iic\\SenseVoiceSmall"
+    kws_model_path = os.path.join(os.path.expanduser("~"), ".cache\\models", kws_model_id)        
+    kws_model = AutoModel(model=kws_model_path, model_type="kws", device="cuda:0", disable_update=True)
+
 except ImportError:
     print("Warning: FunASR not available. Only basic amplitude detection will be used.")
     FUNASR_AVAILABLE = False
@@ -48,26 +65,7 @@ except ImportError:
 DEBUG = True
 
 class VADKWSProcessor:
-    # def play_wav_file(self, wav_path):
-    #     """Play a wav file using PyAudio for debug/simulation"""
-    #     import wave
-    #     wf = wave.open(wav_path, 'rb')
-    #     stream = self.pyaudio.open(
-    #         format=self.pyaudio.get_format_from_width(wf.getsampwidth()),
-    #         channels=wf.getnchannels(),
-    #         rate=wf.getframerate(),
-    #         output=True
-    #     )
-    #     chunk = 1024
-    #     data = wf.readframes(chunk)
-    #     print(f"Playing {wav_path}...")
-    #     while data:
-    #         stream.write(data)
-    #         data = wf.readframes(chunk)
-    #     stream.stop_stream()
-    #     stream.close()
-    #     wf.close()
-    #     print(f"Finished playing {wav_path}")
+
     """
     Real-time Voice Activity Detection and Keyword Spotting with visualization
     """
@@ -127,12 +125,12 @@ class VADKWSProcessor:
         self.input_device_index = None
         
         # Visualization data
-        self.audio_buffer = np.zeros(160000)  # 10 seconds history for display (at 16kHz)
+        self.audio_buffer = np.zeros(80000)  # Changed from 160000 to 80000 (5 seconds history at 16kHz)
         self.vad_history = np.zeros(100)    # VAD result history
         self.detected_keywords = []         # List of detected keywords with timestamps
         
         # VAD and KWS models
-        self.vad_model = None
+        # self.vad_model = None   # Remove vad_model
         self.asr_model = None
         self.last_vad_check = time.time()
         self.audio_buffer_for_vad = np.array([], dtype=np.float32)
@@ -146,7 +144,24 @@ class VADKWSProcessor:
         # Check audio devices and initialize models
         self.check_audio_devices()
         if FUNASR_AVAILABLE:
-            self.init_models()
+            # self.init_models()   # Remove vad_model initialization
+            try:
+                print("Loading ASR model for keyword spotting...")
+                self.asr_model = AutoModel(
+                    model= kws_model_path,
+                    model_revision="v2.0.4",
+                    device="cuda" if self.check_cuda_available() else "cpu",
+                    output_type="dict",
+                    disable_update=True,
+                    disable_log=True,
+                    disable_progress_bar=True
+                )
+                print("ASR model loaded successfully")
+            except Exception as e:
+                print(f"Error loading ASR model: {e}")
+                traceback.print_exc()
+                print("Continuing without ASR model")
+                self.asr_model = None
         
         # Setup visualization
         self.setup_visualization()  # add visualization later
@@ -216,9 +231,9 @@ class VADKWSProcessor:
                 self.stream.start_stream()
                 print(f"Voice activation system started, waiting for speech...")
             
-            # Start processing threads (excluding deprecated audio_input_thread)
-            thread_names = ['VADProcessing', 'KWSProcessing', 'Plotting']
-            thread_targets = [self.vad_processing_thread, self.kws_processing_thread, self.plotting_thread]
+            # Start processing threads (excluding deprecated audio_input_thread and plotting_thread)
+            thread_names = ['KWSProcessing']
+            thread_targets = [self.kws_processing_thread]
             
             for i, (name, target) in enumerate(zip(thread_names, thread_targets)):
                 thread = threading.Thread(target=target, name=name, daemon=True)
@@ -303,117 +318,56 @@ class VADKWSProcessor:
 
         return (None, pyaudio.paContinue)
     
-    def plotting_thread(self):
-        """Thread for handling plot updates - deprecated due to matplotlib threading issues"""
-        print("Plotting thread is deprecated. Use matplotlib animation instead.")
-        return
-
-    def init_models(self):
-        """Initialize VAD and ASR models"""
-        try:
-            # Check if models directory exists locally
-            vad_model_path = "damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-            local_vad_path = os.path.join("models", vad_model_path)
-            if os.path.exists(local_vad_path):
-                vad_model_path = local_vad_path
-                print(f"Using local VAD model: {local_vad_path}")
-            else:
-                print(f"Using remote VAD model: {vad_model_path}")
-                
-            print("Loading VAD model...")
-            self.vad_model = AutoModel(
-                model=vad_model_path,
-                model_revision="v2.0.4",  # 添加模型版本以确保兼容性
-                model_type="vad",
-                device="cuda" if self.check_cuda_available() else "cpu",
-                disable_update=True
-            )
-            
-            print("Loading ASR model for keyword spotting...")
-            self.asr_model = AutoModel(
-                model="paraformer-zh",  # 使用更简单的模型名称
-                model_revision="v2.0.4",  # 添加模型版本以确保兼容性
-                device="cuda" if self.check_cuda_available() else "cpu",
-                output_type="dict",
-                disable_update=True,
-                disable_log=True,  # 禁用日志以减少干扰
-                disable_progress_bar=True  # 禁用进度条以减少干扰
-            )
-            
-            print("Models loaded successfully")
-        except Exception as e:
-            print(f"Error loading models: {e}")
-            traceback.print_exc()  # 打印详细错误信息
-            print("Continuing without models - will use amplitude-based detection only")
-            self.vad_model = None
-            self.asr_model = None
-    
     def setup_visualization(self):
         """Set up the visualization plots"""
-        # 设置matplotlib后端参数以提高兼容性
         plt.rcParams['backend'] = 'TkAgg'
         plt.rcParams['font.size'] = 10
         plt.rcParams['figure.dpi'] = 100
-        
-        # Create figure with subplots
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(10, 8))
+        # 设置中文支持
+        plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
+        plt.rcParams['axes.unicode_minus'] = False
+
+        # Create figure with subplots - only 2 subplots now
+        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 6), 
+                                                      gridspec_kw={'height_ratios': [3, 1]})
         self.fig.tight_layout(pad=3.0)
-        
+
         # Configure audio waveform subplot
         self.ax1.set_title('Audio Waveform & VAD')
         self.ax1.set_ylim(-0.5, 0.5)
-        self.ax1.set_xlabel('Time')
+        self.ax1.set_xlabel('Time (s)')
         self.ax1.set_ylabel('Amplitude')
         self.ax1.grid(True)
-        
+
         # Plot lines for audio data and VAD result
         self.waveform_line, = self.ax1.plot([], [], 'b-', linewidth=1.0, label='Audio')
         self.vad_line, = self.ax1.plot([], [], 'r-', linewidth=2.0, label='VAD Activity')
         self.ax1.legend(loc='upper right')
-        
-        # Configure spectrogram subplot
-        self.ax2.set_title('Spectrogram & Keywords')
-        self.ax2.set_xlabel('Time')
-        self.ax2.set_ylabel('Frequency (Hz)')
-        
-        # Initialize spectrogram
-        self.spec_img = self.ax2.imshow(
-            np.zeros((128, 100)), 
-            aspect='auto',
-            origin='lower',
-            extent=[0, 10, 0, self.sample_rate/2],
-            cmap='viridis'
-        )
-        
-        # Add text for keyword display
-        self.keyword_text = self.ax2.text(
-            0.02, 0.95, 'No keywords detected', 
-            transform=self.ax2.transAxes,
-            fontsize=10,
-            bbox=dict(facecolor='white', alpha=0.7)
-        )
+
+        # Configure amplitude subplot
+        self.ax2.set_title('Mean Amplitude & Keywords')
+        self.ax2.set_xlabel('Time (s)')
+        self.ax2.set_ylabel('Mean Amplitude')
+        self.ax2.grid(True)
         
         # Add status indicator
         self.status_text = self.fig.text(
-            0.02, 0.01, 'Status: Initializing', 
+            0.01, 0.01, 'Status: Initializing',
             fontsize=10,
             bbox=dict(facecolor='white', alpha=0.7)
         )
-        
-        # Make plot interactive
+
         plt.ion()
         self.fig.canvas.draw()
-        
-        # Create animation with更安全的参数
+
         self.animation = FuncAnimation(
-            self.fig, self.update_plot, 
-            interval=100,  # Update every 100ms
+            self.fig, self.update_plot,
+            interval=100,
             blit=False,
             repeat=True,
-            cache_frame_data=False  # 禁用帧缓存以避免内存问题
+            cache_frame_data=False
         )
-        
-        # Set up close event handler
+
         self.fig.canvas.mpl_connect('close_event', self.on_plot_close)
 
     def on_plot_close(self, event):
@@ -437,258 +391,248 @@ class VADKWSProcessor:
     def update_plot(self, frame):
         """Update the plot with new data"""
         try:
-            # Update audio waveform
             with self.lock:
                 audio_buffer_copy = self.audio_buffer.copy() if self.audio_buffer.size > 0 else np.array([])
                 vad_history_copy = self.vad_history.copy() if self.vad_history.size > 0 else np.array([])
                 detected_keywords_copy = self.detected_keywords.copy()
-                
-                # 获取状态
                 recording = self.recording
                 keyword_detected = self.keyword_detected
-            
+
+            # 检测是否有活跃语音 - 使用平均振幅
+            has_active_voice = False
             if audio_buffer_copy.size > 0:
-                # Show last 10 seconds (160000 samples)
-                display_samples = audio_buffer_copy[-160000:]
-                x_audio = np.linspace(0, 10, len(display_samples))  # 10 seconds
+                # 获取最近的音频数据
+                recent_audio = audio_buffer_copy[-16000:]  # 最近1秒的数据
+                mean_amplitude = np.mean(np.abs(recent_audio))
+                has_active_voice = mean_amplitude > self.threshold
+
+            # 只在以下情况刷新：1.有活跃语音 2.有新检测到的关键词 3.状态改变
+            if not hasattr(self, '_last_buffer_len'):
+                self._last_buffer_len = 0
+            if not hasattr(self, '_last_keywords_len'):
+                self._last_keywords_len = 0
+            if not hasattr(self, '_last_state'):
+                self._last_state = (False, False)
+            
+            current_state = (recording, keyword_detected)
+            current_keywords_len = len(detected_keywords_copy)
+
+            # 只有有活跃语音、新关键词或状态变化时才刷新
+            if (not has_active_voice and 
+                audio_buffer_copy.size == self._last_buffer_len and 
+                current_keywords_len == self._last_keywords_len and
+                current_state == self._last_state):
+                # 没有变化，保持当前图表
+                return self.waveform_line, self.vad_line, self.status_text
+            
+            # 更新跟踪变量
+            self._last_buffer_len = audio_buffer_copy.size
+            self._last_keywords_len = current_keywords_len
+            self._last_state = current_state
+
+            # 获取当前绝对时间作为参考点
+            current_time = time.time()
+            
+            # 设置30秒的显示窗口
+            display_time_window = 30.0  # 30秒显示窗口
+            start_time = current_time - display_time_window
+            
+            # Use actual time as x-axis
+            if audio_buffer_copy.size > 0:
+                # 计算需要显示多少采样点（30秒的数据）
+                samples_in_window = int(display_time_window * self.sample_rate)
+                display_samples = audio_buffer_copy[-min(samples_in_window, len(audio_buffer_copy)):]
+
+                # 调整开始时间，使其与实际显示的音频数据对齐
+                start_time = current_time - len(display_samples) / self.sample_rate
+                x_audio = np.linspace(start_time, current_time, len(display_samples))
                 self.waveform_line.set_data(x_audio, display_samples)
-                self.ax1.set_xlim(0, 10)
-            
-            # Update VAD history
+                self.ax1.set_xlim(start_time, current_time)
+                
+                # 使用实际时间格式化x轴标签
+                from datetime import datetime
+                
+                def format_time(x, pos):
+                    return datetime.fromtimestamp(x).strftime('%H:%M:%S')
+                
+                self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+
+            # VAD history update
             if vad_history_copy.size > 0 and audio_buffer_copy.size > 0:
-                x_vad = np.linspace(0, len(audio_buffer_copy[-1000:]), len(vad_history_copy))
-                self.vad_line.set_data(x_vad, vad_history_copy * 0.3)  # Scale to fit in the same plot
-            
-            # Update spectrogram
-            if audio_buffer_copy.size > 1000:
-                try:
-                    # Calculate spectrogram
-                    f, t, Sxx = signal.spectrogram(
-                        audio_buffer_copy[-1000:],
-                        fs=self.sample_rate,
-                        nperseg=256,
-                        noverlap=128
-                    )
-                    # Update spectrogram image
-                    self.spec_img.set_array(10 * np.log10(Sxx + 1e-10))
-                    self.spec_img.set_extent([0, t[-1], 0, f[-1]])
-                except Exception as e:
-                    print(f"Warning: spectrogram update failed: {e}")
-            
-            # Update keyword display
-            if detected_keywords_copy:
-                # Show last 3 detected keywords
-                kw_text = "Detected Keywords:\n"
-                for i, (kw, ts) in enumerate(detected_keywords_copy[-3:]):
-                    kw_text += f"{ts.strftime('%H:%M:%S')}: {kw}\n"
-                self.keyword_text.set_text(kw_text)
-            else:
-                self.keyword_text.set_text("No keywords detected")
-            
-            # Update status
-            status = "Recording" if recording else "Listening"
-            if keyword_detected:
-                status += " (Keyword detected)"
-            self.status_text.set_text(f"Status: {status}")
-            
+                # 调整VAD历史数据以匹配时间窗口
+                vad_samples = min(len(vad_history_copy), int(display_time_window / (len(audio_buffer_copy) / self.sample_rate * len(vad_history_copy))))
+                vad_display = vad_history_copy[-vad_samples:] if vad_samples > 0 else vad_history_copy
+                x_vad = np.linspace(start_time, current_time, len(vad_display))
+                self.vad_line.set_data(x_vad, vad_display * 0.3)
+
+            # Calculate and plot mean amplitude
+            if audio_buffer_copy.size > 0:
+                window_size = int(self.sample_rate * 0.02)  # 20ms window
+                stride = max(1, window_size // 2)
+                mean_amplitudes = []
+                time_points = []
+                for i in range(0, len(display_samples) - window_size, stride):
+                    window = display_samples[i:i+window_size]
+                    mean_amplitudes.append(np.mean(np.abs(window)))
+                    time_points.append(start_time + i / self.sample_rate)
+                
+                self.ax2.clear()
+                self.ax2.set_title('Mean Amplitude & Keywords')
+                self.ax2.set_xlim(start_time, current_time)  # 使下方图表时间与上方同步
+                self.ax2.plot(time_points, mean_amplitudes, color='blue', linewidth=1)
+                self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+
+                # Show all detected keywords on plot - 显示所有关键词
+                if detected_keywords_copy:
+                    max_amp = max(mean_amplitudes) if mean_amplitudes else 1.0
+                    y_pos = max_amp * 0.7
+                    
+                    # 过滤出仅在当前时间窗口内的关键词
+                    visible_keywords = []
+                    for kw, ts in detected_keywords_copy:
+                        ts_sec = ts.timestamp() if isinstance(ts, datetime) else float(ts)
+                        if start_time <= ts_sec <= current_time:
+                            visible_keywords.append((kw, ts_sec, y_pos))
+                    
+                    # 确保关键词不重叠显示
+                    if visible_keywords:
+                        # 简单的防重叠策略
+                        min_time_gap = 1.0  # 最小1秒间隔
+                        displayed = []
+                        for kw, ts_sec, y in visible_keywords:
+                            # 检查是否与已显示的关键词重叠
+                            overlap = False
+                            for d_kw, d_ts, d_y in displayed:
+                                if abs(ts_sec - d_ts) < min_time_gap:
+                                    overlap = True
+                                    break
+                            
+                            # 添加垂直线标记关键词位置
+                            self.ax2.axvline(ts_sec, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
+                            
+                            # 如果重叠，调整y位置
+                            y_offset = 0
+                            if overlap:
+                                y_offset = max_amp * 0.2  # 上移20%
+                            
+                            # 添加带背景的关键词文本，确保清晰可见
+                            self.ax2.text(ts_sec, y + y_offset, f" {kw} ", 
+                                         color='black', fontweight='bold',
+                                         bbox=dict(facecolor='yellow', alpha=0.7, boxstyle='round'),
+                                         horizontalalignment='center',
+                                         verticalalignment='center')
+                            
+                            displayed.append((kw, ts_sec, y + y_offset))
+
         except Exception as e:
             print(f"Error updating plot: {e}")
             traceback.print_exc()
-        
-        return self.waveform_line, self.vad_line, self.spec_img, self.keyword_text, self.status_text
+
+        return self.waveform_line, self.vad_line, self.status_text
     
-    def vad_processing_thread(self):
-        """Thread for processing VAD"""
-        print("VAD processing thread started")
+    def kws_processing_thread(self):
+        """Thread for processing Keyword Spotting (energy-based, no VAD)"""
+        print("KWS processing thread started")
+        window_size = self.chunk_size  # 使用初始化时的chunk_size
+        amplitude_threshold = self.threshold
         
-        while not self.stop_event.is_set() :
+        # 添加无声音计时器
+        silence_timer = 0
+        max_silence_time = 50.0  # 5秒无声音阈值
+        
+        while not self.stop_event.is_set():
             try:
-                # Get audio data from queue with timeout
+                # 从 audio_data_queue 获取原始音频数据
                 try:
                     audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
-                except queue.Empty:
-                    continue
-
-                # Skip if recording already started
-                with self.lock:
-                    if self.recording:
-                        continue
-
-                # Process with VAD model if available
-                vad_segments = []
-                is_speech = False
-
-                if self.vad_model is not None and len(audio_data) >= 1600:
-                    try:
-                        # Ensure audio length is multiple of 400 samples (25ms)
-                        valid_length = (len(audio_data) // 400) * 400
-                        if valid_length > 0:
-                            valid_audio = audio_data[:valid_length]
-                            # Convert numpy array to bytes to avoid PY_SSIZE_T_CLEAN error
-                            # if hasattr(valid_audio, 'tobytes'):
-                            #     valid_audio_bytes = valid_audio.tobytes()
-                            # else:
-                            #     valid_audio_bytes = bytes(valid_audio)
-                            # Process with VAD model
-                            vad_result = self.vad_model.generate(
-                                input=valid_audio,
-                                model_type="vad",
-                                output_type="dict"
-                            )
-
-                            # Parse results
-                            if isinstance(vad_result, list) and len(vad_result) > 0:
-                                result_dict = vad_result[0]
-                                if isinstance(result_dict, dict) and 'value' in result_dict:
-                                    vad_segments = result_dict['value']
-                                    is_speech = len(vad_segments) > 0
-
-                                    # Print segments info if speech detected
-                                    if is_speech:
-                                        print(f"Speech detected with {len(vad_segments)} segments")
-                    except Exception as e:
-                        print(f"VAD error: {e}")
-                        traceback.print_exc()
-                        # Fallback to amplitude-based detection
-                        is_speech = np.abs(audio_data).mean() > self.threshold
-                else:
-                    # Fallback to amplitude-based detection
-                    is_speech = np.abs(audio_data).mean() > self.threshold
-
-                # 测试KWS（ASR）模型，直接在此处调用并打印输出
-                if self.asr_model is not None:
-                    try:
-                        # Debug: print audio_data info
-                        print(f"[ASR Debug] audio_data shape: {audio_data.shape}, dtype: {audio_data.dtype}")
-                        # Convert numpy int16 array to bytes
-                        audio_data_bytes = audio_data.astype(np.int16).tobytes()
-                        # Call ASR model with sample rate if needed
-                        asr_result = self.asr_model.generate(
-                            input=audio_data_bytes,
-                            sample_rate=self.sample_rate,
-                            output_type="dict",
-                            disable_log=True,
-                            disable_progress_bar=True
-                        )
-                        # Parse and print result
-                        if isinstance(asr_result, list) and len(asr_result) > 0:
-                            result_dict = asr_result[0]
-                            if isinstance(result_dict, dict):
-                                text = result_dict.get('text', '')
-                            elif isinstance(result_dict, str):
-                                text = result_dict
-                            else:
-                                text = str(result_dict)
-                            print(f"[KWS Test] ASR result: {text}")
-                    except Exception as e:
-                        print(f"[KWS Test] ASR error: {e}")
-                        traceback.print_exc()
-
-                # Update VAD history for visualization
-                with self.lock:
-                    self.vad_history = np.append(self.vad_history[1:], float(is_speech))
-
-                # If speech detected, process with KWS
-                with self.lock:
-                    keyword_not_detected = not self.keyword_detected
-
-                if is_speech and keyword_not_detected:
-                    try:
-                        self.vad_result_queue.put_nowait((audio_data, timestamp, vad_segments))
-                    except queue.Full:
-                        pass
-
-            except Exception as e:
-                print(f"Error in VAD thread: {e}")
-                traceback.print_exc()
-        
-            if self.isDebug:
-                break  # Debug mode: exit after one iteration
-
-    def kws_processing_thread(self):
-        """Thread for processing Keyword Spotting"""
-        print("KWS processing thread started")
-        
-        while not self.stop_event.is_set() :
-            try:
-                # Get audio data from VAD queue with timeout
-                try:
-                    audio_data, timestamp, vad_segments = self.vad_result_queue.get(timeout=0.1)
                 except queue.Empty:
                     if self.isDebug:
                         break
                     else:
                         continue
-                
-                # Skip if keyword already detected
+
+                # 跳过已检测到关键词或正在录音的情况
                 with self.lock:
                     if self.keyword_detected or self.recording:
                         continue
-                
-                # Process with ASR model if available
+
+                # 能量判据：只处理能量高于阈值的窗口
+                audio_data_np = np.frombuffer(audio_data, dtype=np.int16) if isinstance(audio_data, (bytes, bytearray)) else audio_data
+                audio_data_norm = audio_data_np.astype(np.float32) / 32768.0
+                start_pos = 0
+                found_voice = False
+                while start_pos + window_size <= len(audio_data_norm):
+                    window = audio_data_norm[start_pos:start_pos + window_size]
+                    mean_amp = np.mean(np.abs(window))
+                    if mean_amp > amplitude_threshold:
+                        found_voice = True
+                        silence_timer = 0  # 重置无声音计时器
+                        break
+                    start_pos += window_size // 2  # 可调整重叠
+
+                if not found_voice:
+                    # 更新无声音计时器
+                    chunk_duration = len(audio_data_np) / self.sample_rate
+                    silence_timer += chunk_duration
+                    # 检查是否超过5秒无声音
+                    if silence_timer >= max_silence_time:
+                        with self.lock:
+                            if self.keyword_detected:
+                                print("No voice detected for 5 seconds, resetting keyword detection")
+                                self.keyword_detected = False
+                        silence_timer = 0  # 重置计时器
+                    continue  # 本段无明显语音能量，跳过KWS
+
+                # KWS/ASR模型推理
                 if self.asr_model is not None:
                     try:
-                        # Convert numpy array to bytes before passing to ASR model
-                        if hasattr(audio_data, 'tobytes'):
-                            audio_data_bytes = audio_data.tobytes()
+                        if hasattr(audio_data_np, 'tobytes'):
+                            audio_data_bytes = audio_data_np.tobytes()
                         else:
-                            audio_data_bytes = bytes(audio_data)
-                        # Process with ASR model
+                            audio_data_bytes = bytes(audio_data_np)
                         asr_result = self.asr_model.generate(
                             input=audio_data_bytes,
                             output_type="dict",
                             disable_log=True,
                             disable_progress_bar=True
                         )
-                        
-                        # Parse results
                         if isinstance(asr_result, list) and len(asr_result) > 0:
                             result_dict = asr_result[0]
-                            
-                            # Extract text based on result format
                             if isinstance(result_dict, dict):
                                 text = result_dict.get('text', '')
                             elif isinstance(result_dict, str):
                                 text = result_dict
                             else:
                                 text = str(result_dict)
-                            
                             if text:
                                 print(f"ASR result: {text}")
-                                
-                                # Check for keywords
                                 for keyword in self.keywords:
+                                    with self.lock:
+                                        self.detected_keywords.append((keyword, datetime.now()))
                                     if keyword.lower() in text.lower():
                                         print(f"Keyword detected: {keyword}")
-                                        
-                                        # Add to detected keywords list with timestamp
-                                        with self.lock:
-                                            self.detected_keywords.append((keyword, datetime.now()))
-                                        
-                                        # Set keyword detected flag and start recording
                                         with self.lock:
                                             if not self.keyword_detected and not self.recording:
                                                 self.keyword_detected = True
                                                 threading.Thread(target=self.start_recording, daemon=True).start()
-                                        
                                         break
                     except Exception as e:
                         print(f"KWS error: {e}")
                         traceback.print_exc()
-            
+
             except Exception as e:
                 print(f"Error in KWS thread: {e}")
                 traceback.print_exc()
-            
-            if self.isDebug:
-                break  # Debug mode: exit after one iteration
+
+            # if self.isDebug:
+            #     break  # Debug mode: exit after one iteration
 
 def main():
     """Main function to run the VAD/KWS processor"""
     # Initialize processor with default parameters
     processor = VADKWSProcessor(
         sample_rate=16000,
-        chunk_size=8000,
+        chunk_size=48000,
         threshold=0.01,
         silence_duration=2.0,
         buffer_duration=3.0,
@@ -696,9 +640,9 @@ def main():
     )
     processor.isDebug = True
     processor_started = False
+    plt.tight_layout()
+    plt.show(block=False)
     try:
-        # Debug: simulate live input from test.wav start threads firstly to prepare to receive data
-        
         import os
         test_wav_path = os.path.join(os.path.dirname(__file__), "test.wav")
         if os.path.exists(test_wav_path):
@@ -710,27 +654,21 @@ def main():
                 data = wf.readframes(chunk)
                 if not data:
                     break
-                # Simulate PyAudio callback
-                processor.audio_callback(data, chunk, None, None) #put data into audio_data_queue
-                # Call VAD and KWS processing threads directly for simulation
-
-                vad_result = processor.vad_model.generate(
-                    input=data,
-                    model_type="vad",
-                    output_type="dict"
-                )
-
-                processor.vad_processing_thread()  # Process VAD
-                processor.kws_processing_thread()  # Process the audio data
-                # Optionally, sleep to simulate real-time
+                processor.audio_callback(data, chunk, None, None)
+                processor.kws_processing_thread()
                 time.sleep(chunk / processor.sample_rate)
             wf.close()
             print(f"Finished simulating {test_wav_path}")
-        # Start the processor (for real mic input)
-        processor.start()
-        processor_started = True
-        print("Showing plot window. Close the window to exit.")
-        plt.show()  # This runs the matplotlib event loop in the main thread
+            print("Showing plot window. Close the window to exit.")
+
+        else:
+            # Start the processor for real mic input
+            processor.start()
+            processor_started = True
+            print("Showing plot window. Close the window to exit.")
+            plt.show()  # This runs the matplotlib event loop in the main thread
+        plt.show(block=True) #Not close the plot immediately, wait for user to close it
+    
     except KeyboardInterrupt:
         print("\nStopping...")
     except Exception as e:
@@ -742,4 +680,4 @@ def main():
         print("Processor stopped.")
 
 if __name__ == "__main__":
-    main()
+     main()

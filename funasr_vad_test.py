@@ -149,7 +149,7 @@ def main():
     AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
     AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
     AUDIO_PATH = r"test_music_开始声音测试.wav"
-    AUDIO_PATH = r"test.wav"
+    # AUDIO_PATH = r"test.wav"
     OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 
     vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
@@ -388,7 +388,7 @@ def main():
                     if kws_result and isinstance(kws_result, list):
                         for item in kws_result:
                             if 'text' in item or 'timestamp' in item:
-                                ts = item['timestamp'] if ('timestamp' in item and item['timestamp'] is not None) else start
+                                ts = item['timestamp'] if ('timestamp' in item and item['timestamp'] is not None) else 0
                                 # 采样点为单位，需加上本chunk的起始采样点和窗口内偏移
                                 kws_sample = int(ts + chunk_start_sample + start_pos)
                                 kws_word = item['text'] if 'text' in item else ''
