@@ -396,7 +396,6 @@ class VADKWSProcessor:
         """Update the plot with new data"""
         try:
             with self.lock:
-                # Get data copies to avoid threading issues
                 audio_buffer_copy = list(self.audio_buffer_plot)
                 detected_keywords_copy = list(self.detected_keywords)
                 keyword_detected = self.keyword_detected
@@ -405,16 +404,23 @@ class VADKWSProcessor:
             if not audio_buffer_copy:
                 return self.waveform_line, self.vad_line, self.status_text
 
-            # Generate timestamps for each sample
-            current_time = audio_buffer_copy[-1][1]  # Get the last timestamp
-            display_window = 10.0  # Show last 10 seconds
+            # Use timestamps from audio buffer instead of current time
+            last_chunk, last_timestamp = audio_buffer_copy[-1]
+            current_time = last_timestamp + (len(last_chunk) / self.sample_rate)  # Add duration of last chunk
+            display_window = 5.0  # Show last 5 seconds
             start_time = current_time - display_window
+
+            # Filter buffer data within display window
+            filtered_buffer = [
+                (chunk, ts) for chunk, ts in audio_buffer_copy 
+                if ts + (len(chunk) / self.sample_rate) >= start_time
+            ]
 
             # Concatenate audio data and create matching timestamps
             all_audio = []
             all_timestamps = []
             
-            for audio_chunk, chunk_start_time in audio_buffer_copy:
+            for audio_chunk, chunk_start_time in filtered_buffer:
                 # Generate timestamps for each sample in the chunk
                 chunk_duration = len(audio_chunk) / self.sample_rate
                 chunk_timestamps = np.linspace(
@@ -429,64 +435,62 @@ class VADKWSProcessor:
             audio_samples = np.array(all_audio)
             timestamps = np.array(all_timestamps)
 
-            # Filter data within display window
-            mask = timestamps >= start_time
-            display_samples = audio_samples[mask]
-            display_timestamps = timestamps[mask]
+            # Update plots only if we have data
+            if len(timestamps) > 0:
+                # Update waveform plot
+                self.ax1.clear()
+                self.ax1.set_title('Audio Waveform & Keyword Detection')
+                self.ax1.plot(timestamps, audio_samples, 'b-', linewidth=1.0, label='Audio')
+                
+                # Plot keyword detection status
+                status_line = np.full_like(timestamps, 0.5 if keyword_detected else 0.0)
+                self.ax1.plot(timestamps, status_line, 'r-', linewidth=2.0, label='Keyword Detected')
+                
+                # Configure axis
+                self.ax1.set_xlim(start_time, current_time)
+                self.ax1.set_ylim(-1.0, 1.0)
+                self.ax1.grid(True)
+                self.ax1.legend(loc='upper right')
 
-            # Update waveform plot
-            self.ax1.clear()
-            self.ax1.set_title('Audio Waveform & Keyword Detection')
-            self.ax1.plot(display_timestamps, display_samples, 'b-', linewidth=1.0, label='Audio')
-            
-            # Plot keyword detection status
-            status_line = np.full_like(display_timestamps, 0.5 if keyword_detected else 0.0)
-            self.ax1.plot(display_timestamps, status_line, 'r-', linewidth=2.0, label='Keyword Detected')
-            
-            # Configure axis
-            self.ax1.set_xlim(start_time, current_time)
-            self.ax1.set_ylim(-1.0, 1.0)
-            self.ax1.grid(True)
-            self.ax1.legend(loc='upper right')
+                # Format time axis
+                def format_time(x, pos):
+                    return datetime.fromtimestamp(x).strftime('%H:%M:%S.%f')[:-4]
+                self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
 
-            # Format time axis
-            def format_time(x, pos):
-                return datetime.fromtimestamp(x).strftime('%H:%M:%S')
-            self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+                # Update keyword display (bottom plot)
+                self.ax2.clear()
+                self.ax2.set_title('Detected Keywords')
+                self.ax2.set_xlim(start_time, current_time)
+                self.ax2.set_ylim(-0.1, 1.1)
+                self.ax2.grid(True)
 
-            # Update keyword display (bottom plot)
-            self.ax2.clear()
-            self.ax2.set_title('Detected Keywords')
-            self.ax2.set_xlim(start_time, current_time)
-            self.ax2.set_ylim(-0.1, 1.1)
-            self.ax2.grid(True)
+                # Filter and display keywords within time window
+                visible_keywords = [
+                    (kw, ts) for kw, ts in detected_keywords_copy 
+                    if start_time <= ts <= current_time
+                ]
 
-            # Filter and display keywords within time window
-            visible_keywords = [
-                (kw, ts) for kw, ts in detected_keywords_copy 
-                if start_time <= ts <= current_time
-            ]
+                # Plot keywords with vertical offset to prevent overlap
+                for i, (kw, ts) in enumerate(visible_keywords):
+                    y_pos = 0.2 + (i % 3) * 0.3  # Stack keywords at different heights
+                    self.ax2.axvline(ts, color='red', linestyle='--', alpha=0.7)
+                    self.ax2.text(
+                        ts, y_pos, f" {kw} ",
+                        rotation=45,
+                        color='black',
+                        fontweight='bold',
+                        bbox=dict(facecolor='yellow', alpha=0.7, boxstyle='round'),
+                        horizontalalignment='left'
+                    )
 
-            # Plot keywords
-            for kw, ts in visible_keywords:
-                self.ax2.axvline(ts, color='red', linestyle='--', alpha=0.7)
-                self.ax2.text(
-                    ts, 0.5, f" {kw} ",
-                    rotation=45,
-                    color='black',
-                    fontweight='bold',
-                    bbox=dict(facecolor='yellow', alpha=0.7, boxstyle='round'),
-                    horizontalalignment='left'
-                )
-
-            self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
-            
-            # Update status text
-            status = "Listening..." if keyword_detected else "Waiting for keyword"
-            self.status_text.set_text(f'Status: {status}')
-            
-            # Adjust layout
-            self.fig.tight_layout()
+                self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+                
+                # Update status text
+                status = "Listening..." if keyword_detected else "Waiting for keyword"
+                self.status_text.set_text(f'Status: {status}')
+                
+                # Adjust layout
+                self.fig.tight_layout()
 
         except Exception as e:
             print(f"Error updating plot: {e}")
