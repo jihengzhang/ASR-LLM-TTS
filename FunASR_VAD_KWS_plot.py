@@ -20,7 +20,7 @@ if not hasattr(sys, 'setdlopenflags'):
         # Windows specific DLL loading
         os.add_dll_directory(os.getcwd())
 print("Import libraries...")
-import os
+import os, re
 import time
 import wave
 import queue
@@ -36,6 +36,7 @@ import pyaudio
 from datetime import datetime
 from matplotlib.animation import FuncAnimation
 from scipy import signal
+import collections
 
 # Check if FunASR is available
 try:
@@ -102,11 +103,13 @@ class VADKWSProcessor:
         self.max_silence_frames = int(silence_duration * sample_rate / chunk_size)
         
         # Audio buffer and queues
-        self.buffer = queue.Queue(maxsize=self.buffer_frames)
+        # self.buffer = queue.Queue(maxsize=self.buffer_frames)
         self.audio_data_queue = queue.Queue(maxsize=100)
         self.vad_result_queue = queue.Queue(maxsize=100)
         self.kws_result_queue = queue.Queue(maxsize=20)
+        self.find_valid_start = False
         
+        # Buffer for accumulating audio data
         # Status flags
         self.running = False
         self.recording = False
@@ -125,9 +128,13 @@ class VADKWSProcessor:
         self.input_device_index = None
         
         # Visualization data
-        self.audio_buffer = np.zeros(80000)  # Changed from 160000 to 80000 (5 seconds history at 16kHz)
-        self.vad_history = np.zeros(100)    # VAD result history
-        self.detected_keywords = []         # List of detected keywords with timestamps
+        # self.audio_buffer = np.zeros(80000)  # Changed from 160000 to 80000 (5 seconds history at 16kHz)
+        # self.vad_history = np.zeros(100)    # VAD result history
+        # self.detected_keywords = collections.deque(maxlen=10)  # Use deque to limit memory usage
+        # Change audio_buffer to audio_buffer_plot
+        self.audio_buffer_plot = collections.deque(maxlen=80000)  # [(audio_data, timestamp), ...]
+        self.vad_history = np.zeros(100)    
+        self.detected_keywords = collections.deque(maxlen=10)  # [(text, timestamp), ...]
         
         # VAD and KWS models
         # self.vad_model = None   # Remove vad_model
@@ -302,16 +309,13 @@ class VADKWSProcessor:
             # Normalize to [-1, 1] for visualization
             audio_data_norm = audio_data.astype(np.float32) / 32768.0
 
-            # Add to buffer for visualization
-            with self.lock:
-                self.audio_buffer = np.append(self.audio_buffer, audio_data_norm)[-160000:]
-
-            # Put in queue for processing (raw int16 for VAD/KWS)
+            # Add to buffer collector with timestamp
+            current_time = time.time() #if time_info is None else time_info.get('current_time', time.time())
+            # Put in queue for processing
             try:
-                # self.audio_data_queue.put_nowait((audio_data, time.time()))
-                self.audio_data_queue.put_nowait((in_data, time.time()))
+                self.audio_data_queue.put_nowait((audio_data_norm, current_time))
             except queue.Full:
-                pass  # Drop data if queue is full
+                pass
         except Exception as e:
             print(f"Audio callback error: {e}")
             traceback.print_exc()
@@ -392,137 +396,97 @@ class VADKWSProcessor:
         """Update the plot with new data"""
         try:
             with self.lock:
-                audio_buffer_copy = self.audio_buffer.copy() if self.audio_buffer.size > 0 else np.array([])
-                vad_history_copy = self.vad_history.copy() if self.vad_history.size > 0 else np.array([])
-                detected_keywords_copy = self.detected_keywords.copy()
-                recording = self.recording
+                # Get data copies to avoid threading issues
+                audio_buffer_copy = list(self.audio_buffer_plot)
+                detected_keywords_copy = list(self.detected_keywords)
                 keyword_detected = self.keyword_detected
 
-            # 检测是否有活跃语音 - 使用平均振幅
-            has_active_voice = False
-            if audio_buffer_copy.size > 0:
-                # 获取最近的音频数据
-                recent_audio = audio_buffer_copy[-16000:]  # 最近1秒的数据
-                mean_amplitude = np.mean(np.abs(recent_audio))
-                has_active_voice = mean_amplitude > self.threshold
-
-            # 只在以下情况刷新：1.有活跃语音 2.有新检测到的关键词 3.状态改变
-            if not hasattr(self, '_last_buffer_len'):
-                self._last_buffer_len = 0
-            if not hasattr(self, '_last_keywords_len'):
-                self._last_keywords_len = 0
-            if not hasattr(self, '_last_state'):
-                self._last_state = (False, False)
-            
-            current_state = (recording, keyword_detected)
-            current_keywords_len = len(detected_keywords_copy)
-
-            # 只有有活跃语音、新关键词或状态变化时才刷新
-            if (not has_active_voice and 
-                audio_buffer_copy.size == self._last_buffer_len and 
-                current_keywords_len == self._last_keywords_len and
-                current_state == self._last_state):
-                # 没有变化，保持当前图表
+            # Skip update if no new data
+            if not audio_buffer_copy:
                 return self.waveform_line, self.vad_line, self.status_text
+
+            # Generate timestamps for each sample
+            current_time = audio_buffer_copy[-1][1]  # Get the last timestamp
+            display_window = 10.0  # Show last 10 seconds
+            start_time = current_time - display_window
+
+            # Concatenate audio data and create matching timestamps
+            all_audio = []
+            all_timestamps = []
             
-            # 更新跟踪变量
-            self._last_buffer_len = audio_buffer_copy.size
-            self._last_keywords_len = current_keywords_len
-            self._last_state = current_state
+            for audio_chunk, chunk_start_time in audio_buffer_copy:
+                # Generate timestamps for each sample in the chunk
+                chunk_duration = len(audio_chunk) / self.sample_rate
+                chunk_timestamps = np.linspace(
+                    chunk_start_time, 
+                    chunk_start_time + chunk_duration, 
+                    len(audio_chunk)
+                )
+                all_audio.extend(audio_chunk)
+                all_timestamps.extend(chunk_timestamps)
 
-            # 获取当前绝对时间作为参考点
-            current_time = time.time()
+            # Convert to numpy arrays
+            audio_samples = np.array(all_audio)
+            timestamps = np.array(all_timestamps)
+
+            # Filter data within display window
+            mask = timestamps >= start_time
+            display_samples = audio_samples[mask]
+            display_timestamps = timestamps[mask]
+
+            # Update waveform plot
+            self.ax1.clear()
+            self.ax1.set_title('Audio Waveform & Keyword Detection')
+            self.ax1.plot(display_timestamps, display_samples, 'b-', linewidth=1.0, label='Audio')
             
-            # 设置30秒的显示窗口
-            display_time_window = 30.0  # 30秒显示窗口
-            start_time = current_time - display_time_window
+            # Plot keyword detection status
+            status_line = np.full_like(display_timestamps, 0.5 if keyword_detected else 0.0)
+            self.ax1.plot(display_timestamps, status_line, 'r-', linewidth=2.0, label='Keyword Detected')
             
-            # Use actual time as x-axis
-            if audio_buffer_copy.size > 0:
-                # 计算需要显示多少采样点（30秒的数据）
-                samples_in_window = int(display_time_window * self.sample_rate)
-                display_samples = audio_buffer_copy[-min(samples_in_window, len(audio_buffer_copy)):]
+            # Configure axis
+            self.ax1.set_xlim(start_time, current_time)
+            self.ax1.set_ylim(-1.0, 1.0)
+            self.ax1.grid(True)
+            self.ax1.legend(loc='upper right')
 
-                # 调整开始时间，使其与实际显示的音频数据对齐
-                start_time = current_time - len(display_samples) / self.sample_rate
-                x_audio = np.linspace(start_time, current_time, len(display_samples))
-                self.waveform_line.set_data(x_audio, display_samples)
-                self.ax1.set_xlim(start_time, current_time)
-                
-                # 使用实际时间格式化x轴标签
-                from datetime import datetime
-                
-                def format_time(x, pos):
-                    return datetime.fromtimestamp(x).strftime('%H:%M:%S')
-                
-                self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+            # Format time axis
+            def format_time(x, pos):
+                return datetime.fromtimestamp(x).strftime('%H:%M:%S')
+            self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
 
-            # VAD history update
-            if vad_history_copy.size > 0 and audio_buffer_copy.size > 0:
-                # 调整VAD历史数据以匹配时间窗口
-                vad_samples = min(len(vad_history_copy), int(display_time_window / (len(audio_buffer_copy) / self.sample_rate * len(vad_history_copy))))
-                vad_display = vad_history_copy[-vad_samples:] if vad_samples > 0 else vad_history_copy
-                x_vad = np.linspace(start_time, current_time, len(vad_display))
-                self.vad_line.set_data(x_vad, vad_display * 0.3)
+            # Update keyword display (bottom plot)
+            self.ax2.clear()
+            self.ax2.set_title('Detected Keywords')
+            self.ax2.set_xlim(start_time, current_time)
+            self.ax2.set_ylim(-0.1, 1.1)
+            self.ax2.grid(True)
 
-            # Calculate and plot mean amplitude
-            if audio_buffer_copy.size > 0:
-                window_size = int(self.sample_rate * 0.02)  # 20ms window
-                stride = max(1, window_size // 2)
-                mean_amplitudes = []
-                time_points = []
-                for i in range(0, len(display_samples) - window_size, stride):
-                    window = display_samples[i:i+window_size]
-                    mean_amplitudes.append(np.mean(np.abs(window)))
-                    time_points.append(start_time + i / self.sample_rate)
-                
-                self.ax2.clear()
-                self.ax2.set_title('Mean Amplitude & Keywords')
-                self.ax2.set_xlim(start_time, current_time)  # 使下方图表时间与上方同步
-                self.ax2.plot(time_points, mean_amplitudes, color='blue', linewidth=1)
-                self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+            # Filter and display keywords within time window
+            visible_keywords = [
+                (kw, ts) for kw, ts in detected_keywords_copy 
+                if start_time <= ts <= current_time
+            ]
 
-                # Show all detected keywords on plot - 显示所有关键词
-                if detected_keywords_copy:
-                    max_amp = max(mean_amplitudes) if mean_amplitudes else 1.0
-                    y_pos = max_amp * 0.7
-                    
-                    # 过滤出仅在当前时间窗口内的关键词
-                    visible_keywords = []
-                    for kw, ts in detected_keywords_copy:
-                        ts_sec = ts.timestamp() if isinstance(ts, datetime) else float(ts)
-                        if start_time <= ts_sec <= current_time:
-                            visible_keywords.append((kw, ts_sec, y_pos))
-                    
-                    # 确保关键词不重叠显示
-                    if visible_keywords:
-                        # 简单的防重叠策略
-                        min_time_gap = 1.0  # 最小1秒间隔
-                        displayed = []
-                        for kw, ts_sec, y in visible_keywords:
-                            # 检查是否与已显示的关键词重叠
-                            overlap = False
-                            for d_kw, d_ts, d_y in displayed:
-                                if abs(ts_sec - d_ts) < min_time_gap:
-                                    overlap = True
-                                    break
-                            
-                            # 添加垂直线标记关键词位置
-                            self.ax2.axvline(ts_sec, color='red', linestyle='--', alpha=0.7, linewidth=1.5)
-                            
-                            # 如果重叠，调整y位置
-                            y_offset = 0
-                            if overlap:
-                                y_offset = max_amp * 0.2  # 上移20%
-                            
-                            # 添加带背景的关键词文本，确保清晰可见
-                            self.ax2.text(ts_sec, y + y_offset, f" {kw} ", 
-                                         color='black', fontweight='bold',
-                                         bbox=dict(facecolor='yellow', alpha=0.7, boxstyle='round'),
-                                         horizontalalignment='center',
-                                         verticalalignment='center')
-                            
-                            displayed.append((kw, ts_sec, y + y_offset))
+            # Plot keywords
+            for kw, ts in visible_keywords:
+                self.ax2.axvline(ts, color='red', linestyle='--', alpha=0.7)
+                self.ax2.text(
+                    ts, 0.5, f" {kw} ",
+                    rotation=45,
+                    color='black',
+                    fontweight='bold',
+                    bbox=dict(facecolor='yellow', alpha=0.7, boxstyle='round'),
+                    horizontalalignment='left'
+                )
+
+            self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+            
+            # Update status text
+            status = "Listening..." if keyword_detected else "Waiting for keyword"
+            self.status_text.set_text(f'Status: {status}')
+            
+            # Adjust layout
+            self.fig.tight_layout()
 
         except Exception as e:
             print(f"Error updating plot: {e}")
@@ -531,71 +495,141 @@ class VADKWSProcessor:
         return self.waveform_line, self.vad_line, self.status_text
     
     def kws_processing_thread(self):
-        """Thread for processing Keyword Spotting (energy-based, no VAD)"""
+        """Thread for processing Keyword Spotting with adaptive window"""
         print("KWS processing thread started")
-        window_size = self.chunk_size  # 使用初始化时的chunk_size
-        amplitude_threshold = self.threshold
         
-        # 添加无声音计时器
+        # Constants for voice detection
+        AMPLITUDE_THRESHOLD = self.threshold  # 静音阈值
+        WINDOW_SIZE = min(int(0.2 * self.sample_rate), self.chunk_size)  # 音量检测窗口大小
+        MIN_CHUNK = self.chunk_size  # 最小窗口长度 (0.2秒)
+        MAX_CHUNK = 100 * MIN_CHUNK  # 最大窗口长度 (20秒)
+        PAUSE_VOICE_THRESHOLD = 0.8  # 定义终点的静音时长 (2秒)
+        END_CONV_THRESHOLD = 5.0  # 重置关键词检测的静音时长 (5秒)
+
+        
+        # Track last detection to avoid duplicates
+        last_word_sample = {}   # word: last_sample_index
+        audio_buffer_kws = np.array([], dtype=np.int16)       
+        
+        # Timers
         silence_timer = 0
-        max_silence_time = 50.0  # 5秒无声音阈值
+        # total_samples = 0
+        # last_voice_sample = 0
+        start_pos = 0
         
         while not self.stop_event.is_set():
             try:
-                # 从 audio_data_queue 获取原始音频数据
-                try:
+                # Get audio data from queue
+                buffer_len = len(audio_buffer_kws)
+                # if buffer_len < MAX_CHUNK:
+                try: # processing a chunk each while loop iteration
                     audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
                 except queue.Empty:
                     if self.isDebug:
                         break
-                    else:
+                    if buffer_len < MIN_CHUNK:
+                        if self.isDebug:
+                            print("No audio data in queue")
                         continue
-
-                # 跳过已检测到关键词或正在录音的情况
-                with self.lock:
-                    if self.keyword_detected or self.recording:
-                        continue
-
-                # 能量判据：只处理能量高于阈值的窗口
+                
+                # Convert audio data to numpy array if needed
                 audio_data_np = np.frombuffer(audio_data, dtype=np.int16) if isinstance(audio_data, (bytes, bytearray)) else audio_data
-                audio_data_norm = audio_data_np.astype(np.float32) / 32768.0
-                start_pos = 0
-                found_voice = False
-                while start_pos + window_size <= len(audio_data_norm):
-                    window = audio_data_norm[start_pos:start_pos + window_size]
+                
+                # Concatenate to buffer
+                audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data_np])
+                buffer_len = len(audio_buffer_kws)
+                
+                # Track current chunk start sample
+                # chunk_start_sample = total_samples
+                
+                # Process buffer with sliding window
+                # Find speech start point
+                if not self.find_valid_start: # finish one ASR
+                    while start_pos + MIN_CHUNK <= buffer_len:
+                        # Find speech start point (when mean amplitude exceeds threshold)
+                        start_window = audio_buffer_kws[start_pos:start_pos + WINDOW_SIZE]
+                        if start_window.size < WINDOW_SIZE:
+                            break  # Not enough data for a window
+                        
+                        start_mean = np.mean(np.abs(start_window))
+                        if start_mean < AMPLITUDE_THRESHOLD:
+                            # Audio level below threshold, slide forward
+                            start_pos += WINDOW_SIZE
+
+                            # Update silence timer
+                            chunk_duration = WINDOW_SIZE / self.sample_rate
+                            silence_timer += chunk_duration
+                            # Check if silence exceeds threshold for resetting keyword detection
+                            if silence_timer >= END_CONV_THRESHOLD:
+                                with self.lock:
+                                    if self.keyword_detected:
+                                        if self.isDebug:
+                                            print(f"No voice detected for {END_CONV_THRESHOLD}s, resetting keyword detection")
+                                        self.keyword_detected = False
+                                silence_timer = 0  # Reset silence timer
+                            continue  # continue to next WINDOW Voice CHECK
+                        else:
+                            self.find_valid_start = True
+                            start_time = timestamp # start time of first chunk
+                            silence_timer = 0
+                            break  # Found valid start point, exit loop to process speech chunk
+                            
+                # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
+                search_start = start_pos + MIN_CHUNK
+                search_end = min(start_pos + MAX_CHUNK, buffer_len)
+                boundary = None
+                
+                chunk_duration = WINDOW_SIZE / self.sample_rate
+                for i in range(search_start, search_end, WINDOW_SIZE):
+                    window_end = min(i + WINDOW_SIZE, search_end)
+                    window = audio_buffer_kws[i:window_end]
+                    if window.size == 0:
+                        continue
+                    
                     mean_amp = np.mean(np.abs(window))
-                    if mean_amp > amplitude_threshold:
-                        found_voice = True
-                        silence_timer = 0  # 重置无声音计时器
-                        break
-                    start_pos += window_size // 2  # 可调整重叠
+                    if mean_amp < AMPLITUDE_THRESHOLD:
+                        # Found silence - this is our endpoint
+                        silence_timer += chunk_duration
+                        if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
+                            boundary = window_end
+                            silence_timer = 0  # Reset silence timer
+                            break
+                        else:
+                            continue
+                    else:
+                        silence_timer = 0  # Reset silence timer
 
-                if not found_voice:
-                    # 更新无声音计时器
-                    chunk_duration = len(audio_data_np) / self.sample_rate
-                    silence_timer += chunk_duration
-                    # 检查是否超过5秒无声音
-                    if silence_timer >= max_silence_time:
-                        with self.lock:
-                            if self.keyword_detected:
-                                print("No voice detected for 5 seconds, resetting keyword detection")
-                                self.keyword_detected = False
-                        silence_timer = 0  # 重置计时器
-                    continue  # 本段无明显语音能量，跳过KWS
+                
+                if boundary is None:
+                    if buffer_len < MAX_CHUNK: 
+                    # No silence found, get more data into buffer
+                        # print("No silent pause found, Get more voice data into buffer")
+                        continue # get more data to find pause of speech
+                    else:
+                    # No silence found, use maximum chunk size
+                        boundary = min(start_pos + MAX_CHUNK, buffer_len)
+                
+                # Extract the active speech window
+                chunk_data = audio_buffer_kws[start_pos:boundary]
+                if len(chunk_data) < MIN_CHUNK:
+                    if self.isDebug:
+                        print("Remaining data too short, waiting for more audio")
+                    continue # Remaining data too short
 
-                # KWS/ASR模型推理
+                with self.lock:
+                    self.audio_buffer_plot.append((chunk_data, start_time))
+                
+                # Process through ASR model
                 if self.asr_model is not None:
                     try:
-                        if hasattr(audio_data_np, 'tobytes'):
-                            audio_data_bytes = audio_data_np.tobytes()
-                        else:
-                            audio_data_bytes = bytes(audio_data_np)
                         asr_result = self.asr_model.generate(
-                            input=audio_data_bytes,
+                            input=chunk_data,
                             output_type="dict",
                             disable_log=True,
                             disable_progress_bar=True
                         )
+                        
+                        # Process ASR results
                         if isinstance(asr_result, list) and len(asr_result) > 0:
                             result_dict = asr_result[0]
                             if isinstance(result_dict, dict):
@@ -604,44 +638,81 @@ class VADKWSProcessor:
                                 text = result_dict
                             else:
                                 text = str(result_dict)
+                                
                             if text:
-                                print(f"ASR result: {text}")
-                                for keyword in self.keywords:
-                                    with self.lock:
-                                        self.detected_keywords.append((keyword, datetime.now()))
-                                    if keyword.lower() in text.lower():
-                                        print(f"Keyword detected: {keyword}")
-                                        with self.lock:
-                                            if not self.keyword_detected and not self.recording:
+                                # Clean up text
+                                text = re.sub(r"<\|.*?\|>", "", text)
+                                if self.isDebug:
+                                    print(f"ASR result: {text}")
+                                
+                                # Save to detected keywords with timestamp
+                                with self.lock:
+                                    # kws_sample = chunk_start_sample + start_pos
+                                    self.detected_keywords.append((text, start_time)) #datetime.now())) timestamp is end time of detected keyword
+
+                                # Check if text contains any of our keywords
+                                if not self.keyword_detected:
+                                    for keyword in self.keywords:
+                                        if keyword.lower() in text.lower():
+                                            if self.isDebug:
+                                                print(f"Keyword detected: {keyword}")
+                                            with self.lock:
                                                 self.keyword_detected = True
-                                                threading.Thread(target=self.start_recording, daemon=True).start()
+                                            break
+                                
+                                # Check for conversation end keywords
+                                end_keywords = ["bye", "再见", "ok", "结束", "停止"]
+                                for end_kw in end_keywords:
+                                    if end_kw.lower() in text.lower():                                        
+                                        if self.isDebug:
+                                            print(f"End keyword detected: {end_kw}")
+                                        with self.lock:
+                                            self.keyword_detected = False
                                         break
                     except Exception as e:
-                        print(f"KWS error: {e}")
+                        if self.isDebug:
+                            print(f"KWS inference error: {e}")
                         traceback.print_exc()
-
+                self.find_valid_start = False # end of 1 processing
+                
+                # Move to next position
+                # start_pos = boundary
+            
+                # Retain unprocessed tail
+                if boundary < buffer_len:
+                    audio_buffer_kws = audio_buffer_kws[boundary:]
+                else:
+                    audio_buffer_kws = np.array([], dtype=np.int16)
+                start_pos = 0
+                
+                # Update total samples count
+                # total_samples += len(audio_data_np)
+                
             except Exception as e:
-                print(f"Error in KWS thread: {e}")
+                if self.isDebug:
+                    print(f"Error in KWS thread: {e}")
                 traceback.print_exc()
-
-            # if self.isDebug:
-            #     break  # Debug mode: exit after one iteration
+                
+                if self.isDebug:
+                    break
+    
+        if self.isDebug:
+            print("KWS processing thread stopped")
 
 def main():
     """Main function to run the VAD/KWS processor"""
     # Initialize processor with default parameters
     processor = VADKWSProcessor(
         sample_rate=16000,
-        chunk_size=48000,
-        threshold=0.01,
+        chunk_size=3200,
+        threshold=0.01, #(after normalization)
         silence_duration=2.0,
         buffer_duration=3.0,
-        keywords=["hello", "computer", "system"]
+        keywords=["hello", "hi panda", "hi Michael", "小爱小爱"]
     )
     processor.isDebug = True
     processor_started = False
-    plt.tight_layout()
-    plt.show(block=False)
+
     try:
         import os
         test_wav_path = os.path.join(os.path.dirname(__file__), "test.wav")
@@ -650,14 +721,18 @@ def main():
             wf = wave.open(test_wav_path, 'rb')
             chunk = processor.chunk_size
             print(f"Simulating live input from {test_wav_path}...")
-            while True:
+            while True: # read data into queue firstly
                 data = wf.readframes(chunk)
                 if not data:
                     break
-                processor.audio_callback(data, chunk, None, None)
-                processor.kws_processing_thread()
-                time.sleep(chunk / processor.sample_rate)
+                processor.audio_callback(data, chunk, time.time(), None)
+                # time.sleep(chunk / processor.sample_rate)
             wf.close()
+            processor.isDebug = True
+            processor.kws_processing_thread() # start thread
+            plt.tight_layout()
+            # plt.show(block=False)
+            plt.show(block=True)
             print(f"Finished simulating {test_wav_path}")
             print("Showing plot window. Close the window to exit.")
 
@@ -667,7 +742,7 @@ def main():
             processor_started = True
             print("Showing plot window. Close the window to exit.")
             plt.show()  # This runs the matplotlib event loop in the main thread
-        plt.show(block=True) #Not close the plot immediately, wait for user to close it
+        # plt.show(block=True) #Not close the plot immediately, wait for user to close it
     
     except KeyboardInterrupt:
         print("\nStopping...")

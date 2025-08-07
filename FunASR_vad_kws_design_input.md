@@ -108,3 +108,17 @@
 3. 实现录音文件保存功能
 4. 支持更多可视化选项
 5. 添加降噪预处理
+
+Logic for KWS处理线程(`kws_processing_thread`)
+按照以下逻辑工作:
+
+1. 从音频队列读取数据，并将其连接到缓冲区
+2. 定义语音起点：当平均音量值高于阈值时
+3. 定义语音终点：当静音时间超过预设阈值(NO_VOICE_THRESHOLD = 2s)时
+4. 使用活动窗口(起点到终点)捕获有效语音数据，发送给ASR模型
+5. 将所有识别文本添加到`self.detected_keywords`
+6. 当在识别文本中发现关键词时，设置`self.keyword_detected = True`
+7. 当以下任一条件满足时，重置关键词检测状态(`self.keyword_detected = False`):
+   - 静音时间超过5秒(END_CONV_THRESHOLD = 5)
+   - 检测到终止关键词("bye", "再见", "ok")
+8. 应用自适应窗口大小，在保证识别准确率的同时优化实时性能

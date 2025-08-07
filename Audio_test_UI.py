@@ -112,7 +112,7 @@ def run_processor_ui():
             for kw, ts in processor.detected_keywords[-10:]:
                 result_text.insert(tk.END, f"{ts.strftime('%H:%M:%S')}: {kw}\n")
             result_text.config(state=tk.DISABLED)
-        root.after(500, update_results)  # Update every 500ms
+        root.after(100, update_results)  # Update every 500ms
 
     update_results()  # Start updating results at startup
 
