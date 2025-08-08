@@ -21,11 +21,12 @@ def run_processor_ui():
     # Initialize processor and plot at startup
     processor = VADKWSProcessor(
         sample_rate=16000,
-        chunk_size=1600,
+        chunk_size=8000,
         threshold=0.01,
+        channels=1,
         silence_duration=3.0,
-        buffer_duration=3.0,
-        keywords=["hello panda", "Hi panda", "你好 panda"]
+        buffer_duration=5.0,
+        keywords=["hello", "Hi panda", "hi siri"]
     )
     processor_started = False
     processor.isDebug = False
@@ -99,6 +100,8 @@ def run_processor_ui():
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
     def update_plot_canvas():
+        if not root.winfo_exists():
+            return
         if canvas:
             canvas.draw()
         root.after(100, update_plot_canvas)  # Redraw every 100ms
@@ -106,6 +109,8 @@ def run_processor_ui():
     update_plot_canvas()  # Start canvas redraw loop
 
     def update_results():
+        if not root.winfo_exists():
+            return
         nonlocal processor
         if processor and hasattr(processor, 'detected_keywords'):
             result_text.config(state=tk.NORMAL)

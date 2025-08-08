@@ -306,13 +306,20 @@ class VADKWSProcessor:
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Audio stream callback function"""
         try:
-            # Convert bytes to numpy array
+            # Convert bytes to numpy array and handle multi-channel input
             audio_data = np.frombuffer(in_data, dtype=np.int16)
+            
+            # Reshape if multi-channel (samples, channels)
+            if self.channels > 1:
+                audio_data = audio_data.reshape(-1, self.channels)
+                # Take first channel only
+                audio_data = audio_data[:, 0]
+            
             # Normalize to [-1, 1] for visualization
             audio_data_norm = audio_data.astype(np.float32) / 32768.0
 
             # Add to buffer collector with timestamp
-            current_time = time.time() #if time_info is None else time_info.get('current_time', time.time())
+            current_time = time.time()
             
             # 保存原始音频数据到显示缓冲区
             with self.lock:
@@ -565,18 +572,16 @@ class VADKWSProcessor:
         WINDOW_SIZE = min(int(0.2 * self.sample_rate), self.chunk_size)  # 音量检测窗口大小
         MIN_CHUNK = self.chunk_size  # 最小窗口长度 (0.2秒)
         MAX_CHUNK = 100 * MIN_CHUNK  # 最大窗口长度 (20秒)
-        PAUSE_VOICE_THRESHOLD = 0.8  # 定义终点的静音时长 (2秒)
+        PAUSE_VOICE_THRESHOLD = 1  # 定义终点的静音时长 (2秒)
         END_CONV_THRESHOLD = 5.0  # 重置关键词检测的静音时长 (5秒)
 
         
         # Track last detection to avoid duplicates
-        last_word_sample = {}   # word: last_sample_index
+        # last_word_sample = {}   # word: last_sample_index
         audio_buffer_kws = np.array([], dtype=np.int16)       
         
         # Timers
         silence_timer = 0
-        # total_samples = 0
-        # last_voice_sample = 0
         start_pos = 0
         
         while not self.stop_event.is_set():
@@ -590,17 +595,12 @@ class VADKWSProcessor:
                     audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
                 except queue.Empty:
                     if self.isDebug:
+                        print("No audio data in queue")
                         break
-                    if buffer_len < MIN_CHUNK:
-                        if self.isDebug:
-                            print("No audio data in queue")
-                        continue
+                    continue
                 
-                # Convert audio data to numpy array if needed
-                audio_data_np = np.frombuffer(audio_data, dtype=np.int16) if isinstance(audio_data, (bytes, bytearray)) else audio_data
-                
-                # Concatenate to buffer
-                audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data_np])
+                # Data is already normalized and single-channel from callback
+                audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
                 buffer_len = len(audio_buffer_kws)
                 
                 # Track current chunk start sample
@@ -638,10 +638,11 @@ class VADKWSProcessor:
                             self.find_valid_start = True
                             start_time = timestamp # start time of first chunk , it's too fast in debug mode time.time()  #
                             silence_timer = 0
-                            if start_pos != 0:
-                                start_pos -= int(0.5 * WINDOW_SIZE) # setback half window to get more data
+                            # if start_pos != 0:
+                            #     start_pos -= int(0.5 * WINDOW_SIZE) # setback half window to get more data
                             break  # Found valid start point, exit loop to process speech chunk
                             
+
                 # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                 search_start = start_pos + MIN_CHUNK
                 search_end = min(start_pos + MAX_CHUNK, buffer_len)
@@ -685,8 +686,10 @@ class VADKWSProcessor:
                     continue # Remaining data too short
 
                 with self.lock:
+                    # pass
                     self.audio_buffer_speechonly.append((chunk_data, start_time))
-                
+                    print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate} seconds of speech to buffer")
+
                 # Process through ASR model
                 if self.asr_model is not None:
                     try:
@@ -716,6 +719,7 @@ class VADKWSProcessor:
                                 # Save to detected keywords with timestamp
                                 with self.lock:
                                     # kws_sample = chunk_start_sample + start_pos
+                                    print(f"Appending {text} at {start_time} to buffer")
                                     self.detected_keywords.append((text, start_time)) #datetime.now())) timestamp is end time of detected keyword
 
                                 # Check if text contains any of our keywords
@@ -744,14 +748,15 @@ class VADKWSProcessor:
                 self.find_valid_start = False # end of 1 processing
                 
                 # Move to next position
-                # start_pos = boundary
-            
+                start_pos = boundary  # 关键：推进start_pos到boundary
+
                 # Retain unprocessed tail
                 if boundary < buffer_len:
                     audio_buffer_kws = audio_buffer_kws[boundary:]
+                    start_pos = 0  # buffer已裁剪，start_pos归零
                 else:
-                    audio_buffer_kws = np.array([], dtype=np.int16)
-                start_pos = 0
+                    audio_buffer_kws = np.array([], dtype=np.float32)
+                    start_pos = 0
                 
                 # Update total samples count
                 # total_samples += len(audio_data_np)
@@ -770,29 +775,45 @@ class VADKWSProcessor:
 def main():
     """Main function to run the VAD/KWS processor"""
     # Initialize processor with default parameters
+    # processor = VADKWSProcessor(
+    #     sample_rate=16000,
+    #     chunk_size=8000,
+    #     threshold=0.01, #(after normalization)
+    #     silence_duration=2.0,
+    #     buffer_duration=3.0,
+    #     keywords=["hello", "hi panda", "hi Michael", "小爱小爱", "你好"]
+    # )
     processor = VADKWSProcessor(
         sample_rate=16000,
-        chunk_size=3200,
-        threshold=0.01, #(after normalization)
-        silence_duration=2.0,
-        buffer_duration=3.0,
-        keywords=["hello", "hi panda", "hi Michael", "小爱小爱"]
+        chunk_size=8000,
+        threshold=0.01,
+        channels=1,
+        silence_duration=3.0,
+        buffer_duration=5.0,
+        keywords=["hello", "Hi panda", "hi siri"]
     )
     processor.isDebug = True
     processor_started = False
 
     try:
         import os
-        test_wav_path = os.path.join(os.path.dirname(__file__), "test.wav")
+        test_wav_path = os.path.join(os.path.dirname(__file__), "Hi Panda.wav") #"test.wav")
         if os.path.exists(test_wav_path):
             import wave
             wf = wave.open(test_wav_path, 'rb')
             chunk = processor.chunk_size
-            print(f"Simulating live input from {test_wav_path}...")
-            while True: # read data into queue firstly
+            n_channels = wf.getnchannels()
+            print(f"Simulating live input from {test_wav_path}... (channels={n_channels})")
+            while True:  # read data into queue firstly
                 data = wf.readframes(chunk)
                 if not data:
                     break
+                # Handle multi-channel: convert to mono by taking the first channel
+                if n_channels > 1:
+                    audio = np.frombuffer(data, dtype=np.int16)
+                    audio = audio.reshape(-1, n_channels)
+                    audio = audio[:, 0]  # take first channel
+                    data = audio.astype(np.int16).tobytes()
                 processor.audio_callback(data, chunk, time.time(), None)
                 time.sleep(chunk / processor.sample_rate)
             wf.close()
