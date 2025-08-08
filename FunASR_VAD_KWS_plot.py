@@ -132,8 +132,9 @@ class VADKWSProcessor:
         # self.vad_history = np.zeros(100)    # VAD result history
         # self.detected_keywords = collections.deque(maxlen=10)  # Use deque to limit memory usage
         # Change audio_buffer to audio_buffer_plot
-        self.audio_buffer_original = collections.deque(maxlen=20 * sample_rate)  # 原始音频数据
-        self.audio_buffer_speechonly = collections.deque(maxlen=20 * sample_rate)  # 只保存语音段
+        
+        self.audio_buffer_original = collections.deque(maxlen=25 * sample_rate)  # 原始音频数据
+        self.audio_buffer_speechonly = collections.deque(maxlen=25 * sample_rate)  # 只保存语音段
         self.vad_history = np.zeros(100)    
         self.detected_keywords = collections.deque(maxlen=10)  # [(text, timestamp), ...]
         
@@ -337,28 +338,33 @@ class VADKWSProcessor:
         plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'Arial Unicode MS']
         plt.rcParams['axes.unicode_minus'] = False
 
-        # Create figure with subplots - only 2 subplots now
-        self.fig, (self.ax1, self.ax2) = plt.subplots(2, 1, figsize=(12, 6), 
-                                                      gridspec_kw={'height_ratios': [3, 1]})
+        # Create figure with subplots - now using 3 subplots
+        self.fig, (self.ax1, self.ax3, self.ax2) = plt.subplots(3, 1, figsize=(12, 8), 
+                                                      gridspec_kw={'height_ratios': [2, 2, 1]})
         self.fig.tight_layout(pad=3.0)
 
-        # Configure audio waveform subplot
-        self.ax1.set_title('Audio Waveform & VAD')
+        # Configure original audio waveform subplot
+        self.ax1.set_title('Original Audio')
         self.ax1.set_ylim(-0.5, 0.5)
-        self.ax1.set_xlabel('Time (s)')
         self.ax1.set_ylabel('Amplitude')
         self.ax1.grid(True)
 
-        # Plot lines for audio data and VAD result
-        self.waveform_line, = self.ax1.plot([], [], 'b-', linewidth=1.0, label='Audio')
-        self.vad_line, = self.ax1.plot([], [], 'r-', linewidth=2.0, label='VAD Activity')
-        self.ax1.legend(loc='upper right')
+        # Configure detected speech subplot
+        self.ax3.set_title('Detected Speech')
+        self.ax3.set_ylim(-0.5, 0.5)
+        self.ax3.set_ylabel('Amplitude')
+        self.ax3.grid(True)
 
-        # Configure amplitude subplot
-        self.ax2.set_title('Mean Amplitude & Keywords')
+        # Configure keywords subplot
+        self.ax2.set_title('Detected Keywords')
         self.ax2.set_xlabel('Time (s)')
-        self.ax2.set_ylabel('Mean Amplitude')
+        self.ax2.set_ylabel('Keywords')
         self.ax2.grid(True)
+        
+        # Initialize empty plot lines for update_plot to work with
+        self.waveform_line, = self.ax1.plot([], [], 'gray', linewidth=0.8, label='Original')
+        self.speech_line, = self.ax3.plot([], [], 'b-', linewidth=1.0, label='Speech')
+        self.vad_line, = self.ax1.plot([], [], 'r-', linewidth=1.5, label='Keyword Active')
         
         # Add status indicator
         self.status_text = self.fig.text(
@@ -409,7 +415,7 @@ class VADKWSProcessor:
 
             # Skip update if no new data
             if not audio_buffer_original:
-                return self.waveform_line, self.vad_line, self.status_text
+                return []  # Return empty list since we're not using blit=True
 
             # Use timestamps from audio buffer instead of current time
             if audio_buffer_original:
@@ -463,41 +469,44 @@ class VADKWSProcessor:
                 all_speech_audio.extend(audio_chunk)
                 all_speech_timestamps.extend(chunk_timestamps)
 
-            # Update plots only if we have data
-            self.ax1.clear()
-            self.ax1.set_title('Audio Waveform & Keyword Detection')
+            # 格式化时间轴函数
+            def format_time(x, pos):
+                return datetime.fromtimestamp(x).strftime('%H:%M:%S.%f')[:-4]
             
-            # 绘制原始音频
+            # 更新原始音频子图 (ax1)
+            self.ax1.clear()
+            self.ax1.set_title('Original Audio')
+            
             if all_original_timestamps:
                 original_samples = np.array(all_original_audio)
                 original_timestamps = np.array(all_original_timestamps)
-                # 绘制浅灰色的原始音频
-                self.ax1.plot(original_timestamps, original_samples, 'lightgray', linewidth=0.8, label='Original Audio')
-            
-            # 绘制检测到的语音段
-            if all_speech_timestamps:
-                speech_samples = np.array(all_speech_audio)
-                speech_timestamps = np.array(all_speech_timestamps)
-                # 绘制蓝色的语音段
-                self.ax1.plot(speech_timestamps, speech_samples, 'b-', linewidth=1.2, label='Speech')
-            
-            # Plot keyword detection status
-            if all_original_timestamps:
+                self.ax1.plot(original_timestamps, original_samples, 'gray', linewidth=0.8)
+                
+                # Plot keyword detection status line
                 status_line = np.full_like(original_timestamps, 0.5 if keyword_detected else 0.0)
-                self.ax1.plot(original_timestamps, status_line, 'r-', linewidth=1.5, label='Keyword Detected')
+                self.ax1.plot(original_timestamps, status_line, 'r-', linewidth=1.5, label='Keyword Active')
+                self.ax1.legend(loc='upper right')
             
-            # Configure axis
             self.ax1.set_xlim(start_time, current_time)
             self.ax1.set_ylim(-1.0, 1.0)
             self.ax1.grid(True)
-            self.ax1.legend(loc='upper right')
-
-            # Format time axis
-            def format_time(x, pos):
-                return datetime.fromtimestamp(x).strftime('%H:%M:%S.%f')[:-4]
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+            
+            # 更新语音检测子图 (ax3)
+            self.ax3.clear()
+            self.ax3.set_title('Detected Speech')
+            
+            if all_speech_timestamps:
+                speech_samples = np.array(all_speech_audio)
+                speech_timestamps = np.array(all_speech_timestamps)
+                self.ax3.plot(speech_timestamps, speech_samples, 'b-', linewidth=1.0)
+            
+            self.ax3.set_xlim(start_time, current_time)
+            self.ax3.set_ylim(-1.0, 1.0)
+            self.ax3.grid(True)
+            self.ax3.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
 
-            # Update keyword display (bottom plot)
+            # 更新关键词显示子图 (ax2)
             self.ax2.clear()
             self.ax2.set_title('Detected Keywords')
             self.ax2.set_xlim(start_time, current_time)
@@ -510,7 +519,7 @@ class VADKWSProcessor:
                 if start_time <= ts <= current_time
             ]
 
-            # 将所有关键词显示在同一行，向左对齐
+            # 将所有关键词显示在同一行
             if visible_keywords:
                 y_pos = 0.5  # 所有关键词在中间位置
                 for i, (kw, ts) in enumerate(visible_keywords):
@@ -519,7 +528,7 @@ class VADKWSProcessor:
                     
                     self.ax2.text(
                         ts, y_pos, f" {kw} ",
-                        rotation=0,  # 水平显示文本
+                        rotation=0,
                         color='black',
                         fontweight='bold',
                         bbox=dict(
@@ -528,7 +537,7 @@ class VADKWSProcessor:
                             boxstyle='round,pad=0.5',
                             edgecolor='none'
                         ),
-                        horizontalalignment='left',  # 始终左对齐
+                        horizontalalignment='left',
                         verticalalignment='center'
                     )
 
@@ -545,7 +554,7 @@ class VADKWSProcessor:
             print(f"Error updating plot: {e}")
             traceback.print_exc()
 
-        return self.waveform_line, self.vad_line, self.status_text
+        return []  # Return empty list since we're using blit=False
     
     def kws_processing_thread(self):
         """Thread for processing Keyword Spotting with adaptive window"""
