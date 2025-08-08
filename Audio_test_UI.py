@@ -28,6 +28,7 @@ def run_processor_ui():
         keywords=["hello panda", "Hi panda", "你好 panda"]
     )
     processor_started = False
+    processor.isDebug = False
 
     def start_processor():
         nonlocal processor_started
@@ -109,8 +110,15 @@ def run_processor_ui():
         if processor and hasattr(processor, 'detected_keywords'):
             result_text.config(state=tk.NORMAL)
             result_text.delete(1.0, tk.END)
-            for kw, ts in processor.detected_keywords[-10:]:
-                result_text.insert(tk.END, f"{ts.strftime('%H:%M:%S')}: {kw}\n")
+            # 修正：deque不支持切片，需转为list
+            for kw, ts in list(processor.detected_keywords)[-10:]:
+                # ts 可能为 float 时间戳，需格式化
+                import datetime
+                if isinstance(ts, float):
+                    ts_str = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+                else:
+                    ts_str = str(ts)
+                result_text.insert(tk.END, f"{ts_str}: {kw}\n")
             result_text.config(state=tk.DISABLED)
         root.after(100, update_results)  # Update every 500ms
 
