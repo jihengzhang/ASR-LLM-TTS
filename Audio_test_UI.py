@@ -24,12 +24,13 @@ def run_processor_ui():
         chunk_size=8000,
         threshold=0.01,
         channels=1,
-        silence_duration=3.0,
+        silence_duration=1.0,
         buffer_duration=5.0,
         keywords=["hello", "Hi panda", "hi siri"]
     )
     processor_started = False
     processor.isDebug = False
+    # processor.isDebug = True
 
     def start_processor():
         nonlocal processor_started

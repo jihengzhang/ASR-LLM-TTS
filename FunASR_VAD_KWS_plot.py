@@ -567,32 +567,40 @@ class VADKWSProcessor:
         """Thread for processing Keyword Spotting with adaptive window"""
         print("KWS processing thread started")
         
+        # 添加调试变量
+        process_count = 0
+        last_boundary = 0
+        last_chunk_hash = None
+        
         # Constants for voice detection
-        AMPLITUDE_THRESHOLD = self.threshold  # 静音阈值
-        WINDOW_SIZE = min(int(0.2 * self.sample_rate), self.chunk_size)  # 音量检测窗口大小
-        MIN_CHUNK = self.chunk_size  # 最小窗口长度 (0.2秒)
-        MAX_CHUNK = 100 * MIN_CHUNK  # 最大窗口长度 (20秒)
-        PAUSE_VOICE_THRESHOLD = 1  # 定义终点的静音时长 (2秒)
-        END_CONV_THRESHOLD = 5.0  # 重置关键词检测的静音时长 (5秒)
-
+        AMPLITUDE_THRESHOLD = self.threshold
+        SLIP_WINDOW_TIME = 0.1 # seconds
+        SLIP_WINDOW_SIZE = int(SLIP_WINDOW_TIME * self.sample_rate)
+        MIN_CHUNK = self.chunk_size
+        MAX_CHUNK = 50 * MIN_CHUNK
+        PAUSE_VOICE_THRESHOLD = 1
+        END_CONV_THRESHOLD = 5.0
         
-        # Track last detection to avoid duplicates
-        # last_word_sample = {}   # word: last_sample_index
-        audio_buffer_kws = np.array([], dtype=np.int16)       
-        
-        # Timers
+        audio_buffer_kws = np.array([], dtype=np.int16)
         silence_timer = 0
         start_pos = 0
+        speech_start_time = None  # 记录真实的语音开始时间
         
         while not self.stop_event.is_set():
             try:
                 #
                 #  Get audio data from queue
                 #
-                buffer_len = len(audio_buffer_kws)
-                # if buffer_len < MAX_CHUNK:
-                try: # processing a chunk each while loop iteration
+                
+                # DEBUG: 打印当前状态
+                if self.isDebug:
+                    buffer_len = len(audio_buffer_kws)
+                    print(f"DEBUG: Loop start - buffer_len={buffer_len}, start_pos={start_pos}, find_valid_start={self.find_valid_start}")
+                
+                try:
                     audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
+                    if self.isDebug:
+                        print(f"DEBUG: Got audio chunk at {timestamp}, length={len(audio_data)}")
                 except queue.Empty:
                     if self.isDebug:
                         print("No audio data in queue")
@@ -603,29 +611,23 @@ class VADKWSProcessor:
                 audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
                 buffer_len = len(audio_buffer_kws)
                 
-                # Track current chunk start sample
-                # chunk_start_sample = total_samples
-                
-                #
-                #  Process buffer with sliding window
-                # Find speech start point
-                #
-                if not self.find_valid_start: # finish one ASR
-                    while start_pos + MIN_CHUNK <= buffer_len:
-                        # Find speech start point (when mean amplitude exceeds threshold)
-                        start_window = audio_buffer_kws[start_pos:start_pos + WINDOW_SIZE]
-                        if start_window.size < WINDOW_SIZE:
+                # 寻找语音开始点
+                if not self.find_valid_start:
+                    if self.isDebug:
+                        print(f"DEBUG: Searching for speech start...")
+                    # while start_pos + MIN_CHUNK <= buffer_len:
+                    while start_pos + SLIP_WINDOW_SIZE <= buffer_len:
+                        slip_window = audio_buffer_kws[start_pos:start_pos + SLIP_WINDOW_SIZE]
+                        if slip_window.size < SLIP_WINDOW_SIZE:
                             break  # Not enough data for a window
                         
-                        start_mean = np.mean(np.abs(start_window))
+                        start_mean = np.mean(np.abs(slip_window))
                         if start_mean < AMPLITUDE_THRESHOLD:
-                            # Audio level below threshold, slide forward
-                            start_pos += WINDOW_SIZE
-
-                            # Update silence timer
-                            chunk_duration = WINDOW_SIZE / self.sample_rate
+                            timestamp = timestamp + SLIP_WINDOW_TIME  # Update timestamp for current position
+                            start_pos += SLIP_WINDOW_SIZE
+                            chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
                             silence_timer += chunk_duration
-                            # Check if silence exceeds threshold for resetting keyword detection
+                            
                             if silence_timer >= END_CONV_THRESHOLD:
                                 with self.lock:
                                     if self.keyword_detected:
@@ -636,21 +638,27 @@ class VADKWSProcessor:
                             continue  # continue to next WINDOW Voice CHECK
                         else:
                             self.find_valid_start = True
-                            start_time = timestamp # start time of first chunk , it's too fast in debug mode time.time()  #
+                            # 关键修复：计算真实的语音开始时间
+                            speech_start_time = timestamp #Time stamp is end of speech
+                            # speech_start_time = timestamp - (buffer_len - start_pos) / self.sample_rate #Time stamp is end of speech
                             silence_timer = 0
-                            # if start_pos != 0:
-                            #     start_pos -= int(0.5 * WINDOW_SIZE) # setback half window to get more data
-                            break  # Found valid start point, exit loop to process speech chunk
-                            
+                            # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
+                            if self.isDebug:
+                                print(f"DEBUG: Found speech start at start_pos={start_pos}, calculated start_time={speech_start_time}")
+                            break
+                    if not self.find_valid_start:
+                        continue
+                    else:
+                        boundary = None                            
+                        search_start = start_pos + MIN_CHUNK
 
+
+                #
                 # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
-                search_start = start_pos + MIN_CHUNK
-                search_end = min(start_pos + MAX_CHUNK, buffer_len)
-                boundary = None
-                
-                chunk_duration = WINDOW_SIZE / self.sample_rate
-                for i in range(search_start, search_end, WINDOW_SIZE):
-                    window_end = min(i + WINDOW_SIZE, search_end)
+                #
+                search_end = min(buffer_len, start_pos + MAX_CHUNK)
+                for i in range(search_start, search_end, SLIP_WINDOW_SIZE):
+                    window_end = min(i + SLIP_WINDOW_SIZE, search_end)
                     window = audio_buffer_kws[i:window_end]
                     if window.size == 0:
                         continue
@@ -658,7 +666,7 @@ class VADKWSProcessor:
                     mean_amp = np.mean(np.abs(window))
                     if mean_amp < AMPLITUDE_THRESHOLD:
                         # Found silence - this is our endpoint
-                        silence_timer += chunk_duration
+                        silence_timer += SLIP_WINDOW_TIME
                         if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
                             boundary = window_end
                             silence_timer = 0  # Reset silence timer
@@ -667,28 +675,41 @@ class VADKWSProcessor:
                             continue
                     else:
                         silence_timer = 0  # Reset silence timer
-
-                
+                # else:
                 if boundary is None:
-                    if buffer_len < MAX_CHUNK: 
-                    # No silence found, get more data into buffer
-                        # print("No silent pause found, Get more voice data into buffer")
-                        continue # get more data to find pause of speech
+                    if buffer_len < MAX_CHUNK:
+                        search_start = search_end # next time start from current search_end
+                        continue
                     else:
-                    # No silence found, use maximum chunk size
+                        # No silence found, use maximum chunk size
                         boundary = min(start_pos + MAX_CHUNK, buffer_len)
                 
-                # Extract the active speech window
+                # # Extract the active speech window
                 chunk_data = audio_buffer_kws[start_pos:boundary]
                 if len(chunk_data) < MIN_CHUNK:
+                    boundary = None
                     if self.isDebug:
                         print("Remaining data too short, waiting for more audio")
-                    continue # Remaining data too short
+                    continue
+
+                # DEBUG: 检查是否是重复的chunk
+                # if self.isDebug:
+                #     chunk_hash = hash(chunk_data.tobytes())
+                #     if chunk_hash == last_chunk_hash:
+                #         print(f"WARNING: Duplicate chunk detected! Hash={chunk_hash}")
+                #     last_chunk_hash = chunk_hash
+                
+                #     # DEBUG: 打印处理信息
+                #     process_count += 1
+                #     print(f"DEBUG: Processing chunk #{process_count}")
+                #     print(f"DEBUG: start_pos={start_pos}, boundary={boundary}, last_boundary={last_boundary}")
+                #     print(f"DEBUG: chunk_size={len(chunk_data)}, duration={len(chunk_data)/self.sample_rate:.2f}s")
+                #     print(f"DEBUG: speech_start_time={speech_start_time}")
 
                 with self.lock:
-                    # pass
-                    self.audio_buffer_speechonly.append((chunk_data, start_time))
-                    print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate} seconds of speech to buffer")
+                    self.audio_buffer_speechonly.append((chunk_data, speech_start_time))
+                    if self.isDebug:
+                        print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate:.1f} seconds of speech to buffer")
 
                 # Process through ASR model
                 if self.asr_model is not None:
@@ -719,8 +740,9 @@ class VADKWSProcessor:
                                 # Save to detected keywords with timestamp
                                 with self.lock:
                                     # kws_sample = chunk_start_sample + start_pos
-                                    print(f"Appending {text} at {start_time} to buffer")
-                                    self.detected_keywords.append((text, start_time)) #datetime.now())) timestamp is end time of detected keyword
+                                    if self.isDebug:
+                                        print(f"Appending {text} at {speech_start_time} to buffer")
+                                    self.detected_keywords.append((text, speech_start_time)) #datetime.now())) timestamp is end time of detected keyword
 
                                 # Check if text contains any of our keywords
                                 if not self.keyword_detected:
@@ -746,29 +768,30 @@ class VADKWSProcessor:
                             print(f"KWS inference error: {e}")
                         traceback.print_exc()
                 self.find_valid_start = False # end of 1 processing
-                
+                if self.isDebug:
+                        print(f"End of one ASR Chunk Processing")
+
                 # Move to next position
-                start_pos = boundary  # 关键：推进start_pos到boundary
+                # start_pos = boundary  # 关键：推进start_pos到boundary
 
                 # Retain unprocessed tail
                 if boundary < buffer_len:
+                    if self.isDebug:
+                        print(f"DEBUG: Trimming buffer from {len(audio_buffer_kws)} to {len(audio_buffer_kws) - boundary}")
                     audio_buffer_kws = audio_buffer_kws[boundary:]
                     start_pos = 0  # buffer已裁剪，start_pos归零
                 else:
+                    if self.isDebug:print(f"DEBUG: Clearing entire buffer")
                     audio_buffer_kws = np.array([], dtype=np.float32)
-                    start_pos = 0
-                
-                # Update total samples count
-                # total_samples += len(audio_data_np)
+                start_pos = 0
                 
             except Exception as e:
                 if self.isDebug:
                     print(f"Error in KWS thread: {e}")
                 traceback.print_exc()
-                
                 if self.isDebug:
                     break
-    
+
         if self.isDebug:
             print("KWS processing thread stopped")
 
