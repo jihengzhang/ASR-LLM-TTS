@@ -30,7 +30,7 @@ import argparse
 from xml.parsers.expat import model
 import numpy as np
 import matplotlib
-matplotlib.use('TkAgg')  # 指定后端以避免兼容性问题
+matplotlib.use('wxagg')  # 确保使用WXAgg后端，不使用Tkinter
 import matplotlib.pyplot as plt
 import pyaudio
 from datetime import datetime
@@ -46,6 +46,7 @@ try:
     MODEL_PATH = os.path.join("C:\\Users\\212597558\\.cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
     MODEL_PATH = os.path.join(os.path.expanduser("~"), ".cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
     model_vad_id = r"damo/speech_fsmn_vad_zh-cn-16k-common-pytorch"  # VAD model name 1.6MB
+    vad_model_path = os.path.join(os.path.expanduser("~"), ".cache", "models", "damo", "speech_fsmn_vad_zh-cn-16k-common-pytorch")
 
     AUDIO_PATH = "test/test_vad_20250715_120521.wav"  # Input audio path
     AUDIO_PATH = r"test_2025-07-22-10-41-06.wav"
@@ -53,7 +54,7 @@ try:
     # AUDIO_PATH = r"test.wav"
     OUTPUT_DIR = "output/segments"             # Output directory for saving speech segments
 
-    vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
+    # vad_model = AutoModel(model=MODEL_PATH, model_type="vad", device="cuda", disable_update=True) # works ok
     # vad_model = AutoModel(model=model_vad, model_type="vad", device="cuda", disable_update=True)
     kws_model_id =  r"iic\\SenseVoiceSmall"
     kws_model_path = os.path.join(os.path.expanduser("~"), ".cache\\models", kws_model_id)        
@@ -166,6 +167,18 @@ class VADKWSProcessor:
                     disable_progress_bar=True
                 )
                 print("ASR model loaded successfully")
+
+                # add vad model
+                self.vad_model = AutoModel(
+                    model=vad_model_path,
+                    model_revision="v2.0.4",
+                    device="cuda" if self.check_cuda_available() else "cpu",
+                    output_type="dict",
+                    disable_update=True,
+                    disable_log=True,
+                    disable_progress_bar=True
+                )
+                print("VAD model loaded successfully")
             except Exception as e:
                 print(f"Error loading ASR model: {e}")
                 traceback.print_exc()
@@ -257,51 +270,34 @@ class VADKWSProcessor:
             self.stop()
     
     def stop(self):
-        """Stop the VAD/KWS processor"""
-        print("Stopping VAD/KWS processor...")
-        
-        with self.lock:
-            self.running = False
-            self.stop_event.set()
-        
-        # Stop all threads
-        for thread in self.threads:
-            try:
-                if thread.is_alive():
-                    thread.join(timeout=1.0)
-            except SystemError:
-                # Ignore SystemError exceptions during thread join
-                pass
-            except Exception as e:
-                print(f"Error joining thread: {e}")
-                traceback.print_exc()
-        
-        # Close audio stream safely
+        """Stop the processor"""
         try:
-            if self.stream:
-                try:
-                    if self.stream.is_active():
-                        self.stream.stop_stream()
-                except Exception:
-                    pass  # Ignore if stream not open
-                try:
-                    self.stream.close()
-                except Exception:
-                    pass
+            self.stop_event.set()  # 设置停止事件
+            print("Stopping VAD/KWS processor...")
+            
+            # 安全关闭音频流
+            if hasattr(self, 'stream') and self.stream:
+                self.stream.stop_stream()
+                self.stream.close()
+                
+            # if hasattr(self, 'p') and self.p:
+            #     self.p.terminate()
+                
+            # 正确关闭matplotlib图形，不使用plt.close()
+            # if hasattr(self, 'fig'):
+            #     try:
+            #         import matplotlib.pyplot as plt
+            #         plt.close(self.fig)  # 只关闭特定的figure
+            #     except Exception as e:
+            #         print(f"Error closing plot: {e}")
+            with self.lock:
+                if self.running:
+                    print("Processor is already running")
+                    self.running = False
         except Exception as e:
-            print(f"Error closing audio stream: {e}")
-        
-        # Close PyAudio
-        if self.pyaudio:
-            self.pyaudio.terminate()
-        
-        # Close plot
-        try:
-            plt.close('all')
-        except Exception as e:
-            print(f"Error closing plot: {e}")
-        
-        print("Processor stopped")
+            print(f"Error stopping processor: {e}")
+        finally:
+            print("Processor stopped.")
     
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Audio stream callback function"""
@@ -578,7 +574,7 @@ class VADKWSProcessor:
         SLIP_WINDOW_SIZE = int(SLIP_WINDOW_TIME * self.sample_rate)
         MIN_CHUNK = self.chunk_size
         MAX_CHUNK = 50 * MIN_CHUNK
-        PAUSE_VOICE_THRESHOLD = 1
+        PAUSE_VOICE_THRESHOLD = self.silence_duration
         END_CONV_THRESHOLD = 5.0
         
         audio_buffer_kws = np.array([], dtype=np.int16)
@@ -607,6 +603,7 @@ class VADKWSProcessor:
                         break
                     continue
                 
+
                 # Data is already normalized and single-channel from callback
                 audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
                 buffer_len = len(audio_buffer_kws)
@@ -710,13 +707,27 @@ class VADKWSProcessor:
                     self.audio_buffer_speechonly.append((chunk_data, speech_start_time))
                     if self.isDebug:
                         print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate:.1f} seconds of speech to buffer")
-
+                
+                vad_result = self.vad_model.generate(
+                    chunk_data,
+                    sampling_rate=self.sample_rate,
+                    return_tensors="pt"
+                )
+                print(f"VAD result: {vad_result}")
+                
                 # Process through ASR model
                 if self.asr_model is not None:
                     try:
                         asr_result = self.asr_model.generate(
                             input=chunk_data,
                             output_type="dict",
+                            cache={},
+                            language="zn",  # "zn", "en", "yue", "ja", "ko", "nospeech" "auto"
+                            # language="zn" "en",  # "zn", "en", "yue", "ja", "ko", "nospeech" "auto"
+                            use_itn=True,
+                            batch_size_s=60,
+                            merge_vad=True,  #
+                            merge_length_s=15,
                             disable_log=True,
                             disable_progress_bar=True
                         )
@@ -781,7 +792,7 @@ class VADKWSProcessor:
                     audio_buffer_kws = audio_buffer_kws[boundary:]
                     start_pos = 0  # buffer已裁剪，start_pos归零
                 else:
-                    if self.isDebug:print(f"DEBUG: Clearing entire buffer")
+                    if self.isDebug:print(f"DEBUG: Clearing整个缓冲区")
                     audio_buffer_kws = np.array([], dtype=np.float32)
                 start_pos = 0
                 
@@ -809,9 +820,9 @@ def main():
     processor = VADKWSProcessor(
         sample_rate=16000,
         chunk_size=8000,
-        threshold=0.01,
+        threshold=0.005,
         channels=1,
-        silence_duration=3.0,
+        silence_duration=1.0,
         buffer_duration=5.0,
         keywords=["hello", "Hi panda", "hi siri"]
     )
