@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+False#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Audio_test_UI.py - Simple UI to control FunASR VAD/KWS pipeline with wxPython
@@ -37,9 +37,12 @@ class AudioTestFrame(wx.Frame):
             chunk_size=8000,
             threshold=0.01,
             channels=1,
-            silence_duration=0.4,
+            silence_duration=0.3,
             buffer_duration=5.0,
-            keywords=["hello", "Hi panda", "hi siri"]
+            time_to_end_conversation=5,
+            keywords=["hello", "Hi panda", "hi siri", "你好"],
+            stopwords=["stop", "停止", "ok", "好了", "行了", "就这样吧"]
+
         )
         self.processor_started = False
         self.processor.isDebug = False

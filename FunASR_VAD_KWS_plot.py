@@ -74,7 +74,7 @@ class VADKWSProcessor:
     def __init__(self, sample_rate=16000, chunk_size=1600, channels=1,
                  format=pyaudio.paInt16, threshold=0.01,
                  silence_duration=2.0, vad_interval=0.25, 
-                 buffer_duration=3.0, keywords=None):
+                 buffer_duration=3.0, keywords=None, stopwords="stop", time_to_end_conversation=10):
         """
         Initialize the processor
         
@@ -98,7 +98,8 @@ class VADKWSProcessor:
         self.threshold = threshold
         self.silence_duration = silence_duration
         self.vad_interval = vad_interval
-        
+        self.time_to_end_conversation = time_to_end_conversation
+        self.stopwords = stopwords
         # Calculate frames based on durations
         self.buffer_frames = int(buffer_duration * sample_rate / chunk_size)
         self.max_silence_frames = int(silence_duration * sample_rate / chunk_size)
@@ -115,7 +116,7 @@ class VADKWSProcessor:
         self.running = False
         self.recording = False
         self.speech_detected = False
-        self.keyword_detected = False
+        self.is_keyword_detected = False
         self.silence_counter = 0
         
         # Thread locks and events
@@ -136,8 +137,12 @@ class VADKWSProcessor:
         
         self.audio_buffer_original = collections.deque(maxlen=25 * sample_rate)  # 原始音频数据
         self.audio_buffer_speechonly = collections.deque(maxlen=25 * sample_rate)  # 只保存语音段
+        self.raw_vad_history = collections.deque(maxlen=500)
         self.vad_history = np.zeros(100)    
-        self.detected_keywords = collections.deque(maxlen=10)  # [(text, timestamp), ...]
+        self.detected_keywords = collections.deque(maxlen=20)  # [(text, timestamp), ...]
+        self.detected_vad = collections.deque(maxlen=50)  # [(is_speech, timestamp), ...]
+        self.keyword_status_history = collections.deque(maxlen=50)  # [(is_detected, timestamp), ...]
+        self.speechlevel = collections.deque(maxlen=100)  # [(is_detected, timestamp), ...]
         
         # VAD and KWS models
         # self.vad_model = None   # Remove vad_model
@@ -342,7 +347,7 @@ class VADKWSProcessor:
         plt.rcParams['axes.unicode_minus'] = False
 
         # Create figure with subplots - now using 3 subplots
-        self.fig, (self.ax1, self.ax3, self.ax2) = plt.subplots(3, 1, figsize=(12, 8), 
+        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(12, 8), 
                                                       gridspec_kw={'height_ratios': [2, 2, 1]})
         self.fig.tight_layout(pad=3.0)
 
@@ -353,20 +358,20 @@ class VADKWSProcessor:
         self.ax1.grid(True)
 
         # Configure detected speech subplot
-        self.ax3.set_title('Detected Speech')
-        self.ax3.set_ylim(-0.5, 0.5)
-        self.ax3.set_ylabel('Amplitude')
-        self.ax3.grid(True)
+        self.ax2.set_title('Detected Speech')
+        self.ax2.set_ylim(-0.5, 0.5)
+        self.ax2.set_ylabel('Amplitude')
+        self.ax2.grid(True)
 
         # Configure keywords subplot
-        self.ax2.set_title('Detected Keywords')
-        self.ax2.set_xlabel('Time (s)')
-        self.ax2.set_ylabel('Keywords')
-        self.ax2.grid(True)
+        self.ax3.set_title('Detected Keywords')
+        self.ax3.set_xlabel('Time (s)')
+        self.ax3.set_ylabel('Keywords')
+        self.ax3.grid(True)
         
         # Initialize empty plot lines for update_plot to work with
         self.waveform_line, = self.ax1.plot([], [], 'gray', linewidth=0.8, label='Original')
-        self.speech_line, = self.ax3.plot([], [], 'b-', linewidth=1.0, label='Speech')
+        self.speech_line, = self.ax2.plot([], [], 'b-', linewidth=1.0, label='Speech')
         self.vad_line, = self.ax1.plot([], [], 'r-', linewidth=1.5, label='Keyword Active')
         
         # Add status indicator
@@ -414,8 +419,11 @@ class VADKWSProcessor:
                 audio_buffer_speech = list(self.audio_buffer_speechonly)
                 audio_buffer_original = list(self.audio_buffer_original)
                 detected_keywords_copy = list(self.detected_keywords)
-                keyword_detected = self.keyword_detected
-
+                detected_vad_copy = list(self.detected_vad)
+                keyword_status_history_copy = list(self.keyword_status_history)
+                keyword_detected = self.is_keyword_detected
+                raw_vad_history_copy = list(self.raw_vad_history)
+            
             # Skip update if no new data
             if not audio_buffer_original:
                 return []  # Return empty list since we're not using blit=True
@@ -426,11 +434,13 @@ class VADKWSProcessor:
                 current_time = last_timestamp + (len(last_chunk) / self.sample_rate)  # Add duration of last chunk
             else:
                 current_time = time.time()
-            
+            if self.running:
+                current_time = time.time()
+
             display_window = 20  # Show last 20 seconds
             start_time = current_time - display_window
 
-            # 处理原始音频数据
+            # 处理原始音频数据 in ax1
             all_original_audio = []
             all_original_timestamps = []
             
@@ -472,6 +482,46 @@ class VADKWSProcessor:
                 all_speech_audio.extend(audio_chunk)
                 all_speech_timestamps.extend(chunk_timestamps)
 
+
+            # Process keyword detection status data
+            keyword_status_values = []
+            keyword_status_timestamps = []
+            filtered_keyword_status = [
+                (is_detected, ts) for is_detected, ts in keyword_status_history_copy
+                if ts >= start_time
+            ]
+            
+            # Always ensure we have at least a baseline for the keyword status line
+            if not filtered_keyword_status:
+                # If no recent keyword status, create a flat line at 0
+                keyword_status_timestamps = [start_time, current_time]
+                keyword_status_values = [0.0, 0.0]
+            else:
+                # Create continuous line for keyword detection status
+                last_status = 0
+                last_time = start_time
+                
+                # Add initial point at start_time if needed
+                keyword_status_timestamps.append(start_time)
+                keyword_status_values.append(0.0)  # Default to 0 at start
+                
+                for is_detected, ts in filtered_keyword_status:
+                    # Add point at previous status just before change
+                    keyword_status_timestamps.append(ts - 0.001)
+                    keyword_status_values.append(last_status)
+                    
+                    # Add point at new status
+                    keyword_status_timestamps.append(ts)
+                    # Use 0.5 instead of 0.8 for detected keywords as requested
+                    keyword_status_values.append(0.5 if is_detected else 0.0)
+                    
+                    last_status = 0.5 if is_detected else 0.0
+                    last_time = ts
+                
+                # Add final point to extend to current time
+                keyword_status_timestamps.append(current_time)
+                keyword_status_values.append(last_status)
+
             # 格式化时间轴函数
             def format_time(x, pos):
                 return datetime.fromtimestamp(x).strftime('%H:%M:%S.%f')[:-4]
@@ -484,37 +534,134 @@ class VADKWSProcessor:
                 original_samples = np.array(all_original_audio)
                 original_timestamps = np.array(all_original_timestamps)
                 self.ax1.plot(original_timestamps, original_samples, 'gray', linewidth=0.8)
+
+                # Plot speech level in ax1
+                filtered_speech_level = [
+                    (level, ts) for level, ts in self.speechlevel
+                    if ts >= start_time
+                ]
                 
-                # Plot keyword detection status line
-                status_line = np.full_like(original_timestamps, 0.5 if keyword_detected else 0.0)
-                self.ax1.plot(original_timestamps, status_line, 'r-', linewidth=1.5, label='Keyword Active')
-                self.ax1.legend(loc='upper right')
+                if filtered_speech_level:
+                    level_times = []
+                    level_values = []
+                    last_level = 0
+                    last_time = start_time
+                    
+                    # Add initial point
+                    level_times.append(start_time)
+                    level_values.append(0)
+                    
+                    for level, ts in filtered_speech_level:
+                        # Add point just before state change
+                        level_times.append(ts - 0.001)
+                        level_values.append(last_level)
+                        
+                        # Add point at new state
+                        level_times.append(ts)
+                        level_values.append(level)  # level is already 0 or 1
+                        
+                        last_level = level
+                        last_time = ts
+                    
+                    # Add final point
+                    level_times.append(current_time)
+                    level_values.append(last_level)
+                    
+                    # Plot speech level line in ax1
+                    self.ax1.plot(level_times, level_values, 'b-', 
+                                 linewidth=2.0, alpha=0.7, label='Speech Level')
             
+            self.ax1.legend(loc='upper right')
+
             self.ax1.set_xlim(start_time, current_time)
             self.ax1.set_ylim(-1.0, 1.0)
             self.ax1.grid(True)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
-            # 更新语音检测子图 (ax3)
-            self.ax3.clear()
-            self.ax3.set_title('Detected Speech')
+            # 更新语音检测子图 (ax2) - now showing VAD detection results
+            self.ax2.clear()
+            self.ax2.set_title('Mean filtered audio and VAD Detection')
             
+            # Plot original speech waveform as background
             if all_speech_timestamps:
                 speech_samples = np.array(all_speech_audio)
                 speech_timestamps = np.array(all_speech_timestamps)
-                self.ax3.plot(speech_timestamps, speech_samples, 'b-', linewidth=1.0)
-            
-            self.ax3.set_xlim(start_time, current_time)
-            self.ax3.set_ylim(-1.0, 1.0)
-            self.ax3.grid(True)
-            self.ax3.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+                self.ax2.plot(speech_timestamps, speech_samples, 'gray', 
+                             linewidth=0.8, alpha=0.5, label='Audio')
 
-            # 更新关键词显示子图 (ax2)
-            self.ax2.clear()
-            self.ax2.set_title('Detected Keywords')
+            # Plot VAD detection results
+            filtered_vad = [
+                (vad_level, ts) for vad_level, ts in detected_vad_copy
+                if ts >= start_time
+            ]
+            
+            if filtered_vad:
+                vad_times = []
+                vad_values = []
+                last_level = 0
+                last_time = start_time
+                
+                # Add initial point
+                vad_times.append(start_time)
+                vad_values.append(0)
+                
+                for level, ts in filtered_vad:
+                    # Add point just before state change
+                    vad_times.append(ts - 0.001)
+                    vad_values.append(last_level)
+                    
+                    # Add point at new state
+                    vad_times.append(ts)
+                    vad_values.append(level)  # 直接使用level值(0或0.5)
+                    
+                    last_level = level
+                    last_time = ts
+                
+                # Add final point
+                vad_times.append(current_time)
+                vad_values.append(last_level)
+                
+                # Plot VAD line
+                self.ax2.plot(vad_times, vad_values, 'r-', 
+                             linewidth=2.0, alpha=0.7, label='VAD')
+                
+                # Add colored background for speech periods
+                # for i in range(len(vad_times)-1):
+                #     if vad_values[i] > 0.1:  # If VAD is active
+                #         self.ax2.axvspan(vad_times[i], vad_times[i+1], 
+                #                        color='green', alpha=0.2)
+
+            self.ax2.legend(loc='upper right')
             self.ax2.set_xlim(start_time, current_time)
-            self.ax2.set_ylim(-0.1, 1.1)
+            self.ax2.set_ylim(-1.0, 1.0)
             self.ax2.grid(True)
+            self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+
+            # 更新关键词显示子图 (ax3) - now includes keyword status history
+            self.ax3.clear()
+            self.ax3.set_title('Detected Keywords & Keyword Status')
+            self.ax3.set_xlim(start_time, current_time)
+            self.ax3.set_ylim(-0.1, 1.1)
+            self.ax3.grid(True)
+
+            # Always plot the keyword status line, even if flat at zero
+            self.ax3.plot(keyword_status_timestamps, keyword_status_values, 'r-', 
+                          linewidth=2.0, alpha=0.6, label='Keyword Active')
+            
+            # Add shaded regions for active keyword periods
+            last_val = 0
+            start_shade = None
+            for i, (ts, val) in enumerate(zip(keyword_status_timestamps, keyword_status_values)):
+                if val > 0.1 and last_val < 0.1:  # Keyword became active
+                    start_shade = ts
+                elif val < 0.1 and last_val > 0.1 and start_shade is not None:  # Keyword became inactive
+                    self.ax3.axvspan(start_shade, ts, alpha=0.2, color='red')
+                    start_shade = None
+                last_val = val
+            
+            # Handle case where we're still in active region at end
+            if start_shade is not None:
+                self.ax3.axvspan(start_shade, current_time, alpha=0.2, color='red')
 
             # Filter and display keywords within time window
             visible_keywords = [
@@ -527,9 +674,9 @@ class VADKWSProcessor:
                 y_pos = 0.5  # 所有关键词在中间位置
                 for i, (kw, ts) in enumerate(visible_keywords):
                     # 添加垂直指示线
-                    self.ax2.axvline(ts, color='red', linestyle='--', alpha=0.5)
+                    self.ax3.axvline(ts, color='blue', linestyle='--', alpha=0.5)
                     
-                    self.ax2.text(
+                    self.ax3.text(
                         ts, y_pos, f" {kw} ",
                         rotation=0,
                         color='black',
@@ -543,8 +690,11 @@ class VADKWSProcessor:
                         horizontalalignment='left',
                         verticalalignment='center'
                     )
+            
+            # Always show the legend in ax3
+            self.ax3.legend(loc='upper right')
 
-            self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
+            self.ax3.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
             # Update status text
             status = "Listening..." if keyword_detected else "Waiting for keyword"
@@ -575,12 +725,17 @@ class VADKWSProcessor:
         MIN_CHUNK = self.chunk_size
         MAX_CHUNK = 50 * MIN_CHUNK
         PAUSE_VOICE_THRESHOLD = self.silence_duration
-        END_CONV_THRESHOLD = 5.0
+        END_CONV_THRESHOLD = self.time_to_end_conversation
         
         audio_buffer_kws = np.array([], dtype=np.int16)
         silence_timer = 0
         start_pos = 0
         speech_start_time = None  # 记录真实的语音开始时间
+        
+        # Add initial keyword status
+        with self.lock:
+            current_time = time.time()
+            self.keyword_status_history.append((False, current_time))
         
         while not self.stop_event.is_set():
             try:
@@ -603,11 +758,12 @@ class VADKWSProcessor:
                         break
                     continue
                 
-
                 # Data is already normalized and single-channel from callback
                 audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
                 buffer_len = len(audio_buffer_kws)
+                self.keyword_status_history.append((self.is_keyword_detected, timestamp))
                 
+
                 # 寻找语音开始点
                 if not self.find_valid_start:
                     if self.isDebug:
@@ -624,21 +780,37 @@ class VADKWSProcessor:
                             start_pos += SLIP_WINDOW_SIZE
                             chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
                             silence_timer += chunk_duration
+                            with self.lock:
+                                self.speechlevel.append((0,timestamp))
+                            # Update VAD status for this segment (no speech)
+                            # with self.lock:
+                            #     self.detected_vad.append((False, timestamp))
                             
+
                             if silence_timer >= END_CONV_THRESHOLD:
                                 with self.lock:
-                                    if self.keyword_detected:
+                                    if self.is_keyword_detected:
                                         if self.isDebug:
                                             print(f"No voice detected for {END_CONV_THRESHOLD}s, resetting keyword detection")
-                                        self.keyword_detected = False
+                                        self.is_keyword_detected = False
+                                        # Record keyword status change
+                                        self.keyword_status_history.append((self.is_keyword_detected, timestamp))
                                 silence_timer = 0  # Reset silence timer
                             continue  # continue to next WINDOW Voice CHECK
                         else:
                             self.find_valid_start = True
                             # 关键修复：计算真实的语音开始时间
                             speech_start_time = timestamp #Time stamp is end of speech
-                            # speech_start_time = timestamp - (buffer_len - start_pos) / self.sample_rate #Time stamp is end of speech
+                            with self.lock:
+                                self.speechlevel.append((0.5,timestamp))
                             silence_timer = 0
+                            
+
+                            # Update VAD status (speech detected)
+                            # with self.lock:
+                            #     self.detected_vad.append((True, timestamp))
+                                
+
                             # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                             if self.isDebug:
                                 print(f"DEBUG: Found speech start at start_pos={start_pos}, calculated start_time={speech_start_time}")
@@ -649,28 +821,42 @@ class VADKWSProcessor:
                         boundary = None                            
                         search_start = start_pos + MIN_CHUNK
 
-
                 #
                 # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                 #
                 search_end = min(buffer_len, start_pos + MAX_CHUNK)
                 for i in range(search_start, search_end, SLIP_WINDOW_SIZE):
                     window_end = min(i + SLIP_WINDOW_SIZE, search_end)
+                    end_time = speech_start_time + (window_end - start_pos) / self.sample_rate
                     window = audio_buffer_kws[i:window_end]
                     if window.size == 0:
                         continue
-                    
+                        
                     mean_amp = np.mean(np.abs(window))
                     if mean_amp < AMPLITUDE_THRESHOLD:
                         # Found silence - this is our endpoint
                         silence_timer += SLIP_WINDOW_TIME
+                        
+                        # Update VAD status (no speech)
+                        # with self.lock:
+                        #     current_time = timestamp + (i - start_pos) / self.sample_rate
+                        #     self.detected_vad.append((False, current_time))
+                            
                         if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
                             boundary = window_end
                             silence_timer = 0  # Reset silence timer
+                            with self.lock:
+                                self.speechlevel.append((0,end_time))
                             break
                         else:
                             continue
                     else:
+                        # Update VAD status (speech continues)
+                        # with self.lock:
+                        #     current_time = timestamp + (i - start_pos) / self.sample_rate
+                        #     self.detected_vad.append((True, current_time))
+                        with self.lock:
+                            self.speechlevel.append((0.5,end_time))
                         silence_timer = 0  # Reset silence timer
                 # else:
                 if boundary is None:
@@ -689,32 +875,44 @@ class VADKWSProcessor:
                         print("Remaining data too short, waiting for more audio")
                     continue
 
-                # DEBUG: 检查是否是重复的chunk
-                # if self.isDebug:
-                #     chunk_hash = hash(chunk_data.tobytes())
-                #     if chunk_hash == last_chunk_hash:
-                #         print(f"WARNING: Duplicate chunk detected! Hash={chunk_hash}")
-                #     last_chunk_hash = chunk_hash
-                
-                #     # DEBUG: 打印处理信息
-                #     process_count += 1
-                #     print(f"DEBUG: Processing chunk #{process_count}")
-                #     print(f"DEBUG: start_pos={start_pos}, boundary={boundary}, last_boundary={last_boundary}")
-                #     print(f"DEBUG: chunk_size={len(chunk_data)}, duration={len(chunk_data)/self.sample_rate:.2f}s")
-                #     print(f"DEBUG: speech_start_time={speech_start_time}")
-
                 with self.lock:
                     self.audio_buffer_speechonly.append((chunk_data, speech_start_time))
                     if self.isDebug:
                         print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate:.1f} seconds of speech to buffer")
                 
+                #
+                # vad detection
+                #
                 vad_result = self.vad_model.generate(
-                    chunk_data,
-                    sampling_rate=self.sample_rate,
-                    return_tensors="pt"
-                )
+                        audio_buffer_kws,
+                        sampling_rate=self.sample_rate,
+                        return_tensors="pt"
+                    )
                 print(f"VAD result: {vad_result}")
+
+                # vad_result = self.vad_model.generate(audio_buffer_kws)
+
+                # 处理VAD结果
+                if isinstance(vad_result, list) and len(vad_result) > 0:
+                    vad_item = vad_result[0]  # 获取第一个结果
+                    vad_value = vad_item.get('value', [])  # 获取value列表
                 
+                    with self.lock:
+                        if not vad_value:
+                            # value为空列表时，标记为0
+                            self.detected_vad.append((0, speech_start_time))
+                        else:
+                            # 对于每个检测到的语音区间
+                            for segment in vad_value:
+                                start_sample, end_sample = segment
+                                # 将采样点索引转换为时间戳
+                                start_time = speech_start_time + start_sample / self.sample_rate
+                                end_time = speech_start_time + end_sample / self.sample_rate
+                                
+                                # 记录语音区间的起始和结束，使用0.5表示检测到语音
+                                self.detected_vad.append((0.5, start_time))
+                                self.detected_vad.append((0, end_time))
+
                 # Process through ASR model
                 if self.asr_model is not None:
                     try:
@@ -745,6 +943,7 @@ class VADKWSProcessor:
                             if text:
                                 # Clean up text
                                 text = re.sub(r"<\|.*?\|>", "", text)
+                                text = re.sub(r"[^\w\s]", "", text)  # 去除所有标点符号
                                 if self.isDebug:
                                     print(f"ASR result: {text}")
                                 
@@ -756,31 +955,34 @@ class VADKWSProcessor:
                                     self.detected_keywords.append((text, speech_start_time)) #datetime.now())) timestamp is end time of detected keyword
 
                                 # Check if text contains any of our keywords
-                                if not self.keyword_detected:
+                                if not self.is_keyword_detected:
                                     for keyword in self.keywords:
                                         if keyword.lower() in text.lower():
                                             if self.isDebug:
                                                 print(f"Keyword detected: {keyword}")
                                             with self.lock:
-                                                self.keyword_detected = True
+                                                self.is_keyword_detected = True
+                                                # Record keyword status change with timestamp
+                                                self.keyword_status_history.append((self.is_keyword_detected, speech_start_time))
                                             break
                                 
                                 # Check for conversation end keywords
-                                end_keywords = ["bye", "再见", "ok", "结束", "停止"]
+
+                                end_keywords = self.stopwords if self.stopwords else ["bye", "再见", "goodbye", "结束", "停止"]
                                 for end_kw in end_keywords:
                                     if end_kw.lower() in text.lower():                                        
                                         if self.isDebug:
                                             print(f"End keyword detected: {end_kw}")
                                         with self.lock:
-                                            self.keyword_detected = False
+                                            self.is_keyword_detected = False
+                                            # Record keyword status change with timestamp
+                                            self.keyword_status_history.append((self.is_keyword_detected, speech_start_time))
                                         break
                     except Exception as e:
                         if self.isDebug:
                             print(f"KWS inference error: {e}")
                         traceback.print_exc()
                 self.find_valid_start = False # end of 1 processing
-                if self.isDebug:
-                        print(f"End of one ASR Chunk Processing")
 
                 # Move to next position
                 # start_pos = boundary  # 关键：推进start_pos到boundary
@@ -822,7 +1024,7 @@ def main():
         chunk_size=8000,
         threshold=0.005,
         channels=1,
-        silence_duration=1.0,
+        silence_duration=0.3,
         buffer_duration=5.0,
         keywords=["hello", "Hi panda", "hi siri"]
     )
