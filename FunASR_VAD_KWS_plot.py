@@ -142,10 +142,10 @@ class VADKWSProcessor:
         self.detected_keywords = collections.deque(maxlen=20)  # [(text, timestamp), ...]
         self.detected_vad = collections.deque(maxlen=50)  # [(is_speech, timestamp), ...]
         self.keyword_status_history = collections.deque(maxlen=50)  # [(is_detected, timestamp), ...]
-        self.speechlevel = collections.deque(maxlen=100)  # [(is_detected, timestamp), ...]
+        self.speech_level = collections.deque(maxlen=100)  # [(is_detected, timestamp), ...]
         
         # VAD and KWS models
-        # self.vad_model = None   # Remove vad_model
+        self.vad_model = None   # 初始化为None
         self.asr_model = None
         self.last_vad_check = time.time()
         self.audio_buffer_for_vad = np.array([], dtype=np.float32)
@@ -189,6 +189,9 @@ class VADKWSProcessor:
                 traceback.print_exc()
                 print("Continuing without ASR model")
                 self.asr_model = None
+                self.vad_model = None
+        else:
+            print("FunASR not available, continuing without VAD/ASR models")
         
         # Setup visualization
         self.setup_visualization()  # add visualization later
@@ -329,6 +332,8 @@ class VADKWSProcessor:
             # Put in queue for processing
             try:
                 self.audio_data_queue.put_nowait((audio_data_norm, current_time))
+                if self.isDebug:
+                    print(f"Audio data added to queue，length: {len(audio_data_norm)}")
             except queue.Full:
                 pass
         except Exception as e:
@@ -386,7 +391,7 @@ class VADKWSProcessor:
 
         self.animation = FuncAnimation(
             self.fig, self.update_plot,
-            interval=100,
+            interval=500,
             blit=False,
             repeat=True,
             cache_frame_data=False
@@ -537,7 +542,7 @@ class VADKWSProcessor:
 
                 # Plot speech level in ax1
                 filtered_speech_level = [
-                    (level, ts) for level, ts in self.speechlevel
+                    (level, ts) for level, ts in self.speech_level
                     if ts >= start_time
                 ]
                 
@@ -726,12 +731,13 @@ class VADKWSProcessor:
         MAX_CHUNK = 50 * MIN_CHUNK
         PAUSE_VOICE_THRESHOLD = self.silence_duration
         END_CONV_THRESHOLD = self.time_to_end_conversation
+        chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
         
         audio_buffer_kws = np.array([], dtype=np.int16)
         silence_timer = 0
         start_pos = 0
         speech_start_time = None  # 记录真实的语音开始时间
-        
+        search_start = start_pos + MIN_CHUNK
         # Add initial keyword status
         with self.lock:
             current_time = time.time()
@@ -746,8 +752,8 @@ class VADKWSProcessor:
                 # DEBUG: 打印当前状态
                 if self.isDebug:
                     buffer_len = len(audio_buffer_kws)
-                    print(f"DEBUG: Loop start - buffer_len={buffer_len}, start_pos={start_pos}, find_valid_start={self.find_valid_start}")
-                
+                    print(f"DEBUG: Start read data from queue - buffer_len={buffer_len}, start_pos={start_pos}, find_valid_start={self.find_valid_start}")
+
                 try:
                     audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
                     if self.isDebug:
@@ -755,7 +761,7 @@ class VADKWSProcessor:
                 except queue.Empty:
                     if self.isDebug:
                         print("No audio data in queue")
-                        break
+                        # break
                     continue
                 
                 # Data is already normalized and single-channel from callback
@@ -778,10 +784,9 @@ class VADKWSProcessor:
                         if start_mean < AMPLITUDE_THRESHOLD:
                             timestamp = timestamp + SLIP_WINDOW_TIME  # Update timestamp for current position
                             start_pos += SLIP_WINDOW_SIZE
-                            chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
                             silence_timer += chunk_duration
                             with self.lock:
-                                self.speechlevel.append((0,timestamp))
+                                self.speech_level.append((0,timestamp))
                             # Update VAD status for this segment (no speech)
                             # with self.lock:
                             #     self.detected_vad.append((False, timestamp))
@@ -802,28 +807,34 @@ class VADKWSProcessor:
                             # 关键修复：计算真实的语音开始时间
                             speech_start_time = timestamp #Time stamp is end of speech
                             with self.lock:
-                                self.speechlevel.append((0.5,timestamp))
+                                self.speech_level.append((0.5,timestamp))
                             silence_timer = 0
-                            
-
-                            # Update VAD status (speech detected)
-                            # with self.lock:
-                            #     self.detected_vad.append((True, timestamp))
-                                
-
+ 
                             # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                             if self.isDebug:
                                 print(f"DEBUG: Found speech start at start_pos={start_pos}, calculated start_time={speech_start_time}")
                             break
-                    if not self.find_valid_start:
+                    
+                    #Trim buffer if no valid speech data
+                    if self.isDebug:
+                        print(f" len of audio_buffer is: {len(audio_buffer_kws)} before trimming")
+                    audio_buffer_kws = audio_buffer_kws[start_pos:]
+                    start_pos = 0
+                    if len(audio_buffer_kws) == 0:
+                        self.find_valid_start = False  
                         continue
                     else:
                         boundary = None                            
                         search_start = start_pos + MIN_CHUNK
-
+                #     # trim buffer if not find valid start
+                    if self.isDebug:
+                        print(f" len of audio_buffer is: {len(audio_buffer_kws)} after trimming")
                 #
                 # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                 #
+                if self.isDebug:
+                    print(f"DEBUG: Searching for speech stop...")
+                buffer_len = len(audio_buffer_kws)
                 search_end = min(buffer_len, start_pos + MAX_CHUNK)
                 for i in range(search_start, search_end, SLIP_WINDOW_SIZE):
                     window_end = min(i + SLIP_WINDOW_SIZE, search_end)
@@ -835,18 +846,12 @@ class VADKWSProcessor:
                     mean_amp = np.mean(np.abs(window))
                     if mean_amp < AMPLITUDE_THRESHOLD:
                         # Found silence - this is our endpoint
-                        silence_timer += SLIP_WINDOW_TIME
-                        
-                        # Update VAD status (no speech)
-                        # with self.lock:
-                        #     current_time = timestamp + (i - start_pos) / self.sample_rate
-                        #     self.detected_vad.append((False, current_time))
-                            
+                        silence_timer += SLIP_WINDOW_TIME                            
                         if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
                             boundary = window_end
                             silence_timer = 0  # Reset silence timer
                             with self.lock:
-                                self.speechlevel.append((0,end_time))
+                                self.speech_level.append((0,end_time))
                             break
                         else:
                             continue
@@ -856,7 +861,7 @@ class VADKWSProcessor:
                         #     current_time = timestamp + (i - start_pos) / self.sample_rate
                         #     self.detected_vad.append((True, current_time))
                         with self.lock:
-                            self.speechlevel.append((0.5,end_time))
+                            self.speech_level.append((0.5,end_time))
                         silence_timer = 0  # Reset silence timer
                 # else:
                 if boundary is None:
@@ -871,6 +876,7 @@ class VADKWSProcessor:
                 chunk_data = audio_buffer_kws[start_pos:boundary]
                 if len(chunk_data) < MIN_CHUNK:
                     boundary = None
+                    self.find_valid_start = False
                     if self.isDebug:
                         print("Remaining data too short, waiting for more audio")
                     continue
@@ -883,37 +889,43 @@ class VADKWSProcessor:
                 #
                 # vad detection
                 #
-                vad_result = self.vad_model.generate(
-                        audio_buffer_kws,
-                        sampling_rate=self.sample_rate,
-                        return_tensors="pt"
-                    )
-                print(f"VAD result: {vad_result}")
+                if self.vad_model is not None:
+                    vad_result = self.vad_model.generate(
+                            audio_buffer_kws,
+                            sampling_rate=self.sample_rate,
+                            return_tensors="pt"
+                        )
+                    print(f"VAD result: {vad_result}")
 
-                # vad_result = self.vad_model.generate(audio_buffer_kws)
-
-                # 处理VAD结果
-                if isinstance(vad_result, list) and len(vad_result) > 0:
-                    vad_item = vad_result[0]  # 获取第一个结果
-                    vad_value = vad_item.get('value', [])  # 获取value列表
-                
-                    with self.lock:
-                        if not vad_value:
-                            # value为空列表时，标记为0
-                            self.detected_vad.append((0, speech_start_time))
-                        else:
-                            # 对于每个检测到的语音区间
-                            for segment in vad_value:
-                                start_sample, end_sample = segment
-                                # 将采样点索引转换为时间戳
-                                start_time = speech_start_time + start_sample / self.sample_rate
-                                end_time = speech_start_time + end_sample / self.sample_rate
-                                
-                                # 记录语音区间的起始和结束，使用0.5表示检测到语音
-                                self.detected_vad.append((0.5, start_time))
-                                self.detected_vad.append((0, end_time))
+                    # 处理VAD结果
+                    if self.isDebug:
+                        print(f"DEBUG: Processing VAD to speech ...")
+                    if isinstance(vad_result, list) and len(vad_result) > 0:
+                        vad_item = vad_result[0]  # 获取第一个结果
+                        vad_value = vad_item.get('value', [])  # 获取value列表
+                    
+                        with self.lock:
+                            if not vad_value:
+                                # value为空列表时，标记为0
+                                self.detected_vad.append((0, speech_start_time))
+                            else:
+                                # 对于每个检测到的语音区间
+                                for segment in vad_value:
+                                    start_sample, end_sample = segment
+                                    # 将采样点索引转换为时间戳
+                                    start_time = speech_start_time + start_sample / self.sample_rate
+                                    end_time = speech_start_time + end_sample / self.sample_rate
+                                    
+                                    # 记录语音区间的起始和结束，使用0.5表示检测到语音
+                                    self.detected_vad.append((0.5, start_time))
+                                    self.detected_vad.append((0, end_time))
+                else:
+                    if self.isDebug:
+                        print("VAD model not available, skipping VAD detection")
 
                 # Process through ASR model
+                if self.isDebug:
+                    print(f"DEBUG: Processing speech ASR...")
                 if self.asr_model is not None:
                     try:
                         asr_result = self.asr_model.generate(
@@ -988,6 +1000,8 @@ class VADKWSProcessor:
                 # start_pos = boundary  # 关键：推进start_pos到boundary
 
                 # Retain unprocessed tail
+                if self.isDebug:
+                    print(f" len of audio_buffer_kws: {len(audio_buffer_kws)} before trimming")
                 if boundary < buffer_len:
                     if self.isDebug:
                         print(f"DEBUG: Trimming buffer from {len(audio_buffer_kws)} to {len(audio_buffer_kws) - boundary}")
@@ -997,7 +1011,8 @@ class VADKWSProcessor:
                     if self.isDebug:print(f"DEBUG: Clearing整个缓冲区")
                     audio_buffer_kws = np.array([], dtype=np.float32)
                 start_pos = 0
-                
+                if self.isDebug:
+                    print(f" len of audio_buffer_kws: {len(audio_buffer_kws)} after trimming")
             except Exception as e:
                 if self.isDebug:
                     print(f"Error in KWS thread: {e}")

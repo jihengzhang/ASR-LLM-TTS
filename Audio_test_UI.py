@@ -41,7 +41,7 @@ class AudioTestFrame(wx.Frame):
             buffer_duration=5.0,
             time_to_end_conversation=5,
             keywords=["hello", "Hi panda", "hi siri", "你好"],
-            stopwords=["stop", "停止", "ok", "好了", "行了", "就这样吧"]
+            stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"]
 
         )
         self.processor_started = False
