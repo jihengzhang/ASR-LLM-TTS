@@ -1,11 +1,15 @@
-False#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Audio_test_UI.py - Simple UI to control FunASR VAD/KWS pipeline with wxPython
 """
 import sys
+import os
+import re
 import threading
 import datetime
+import traceback
+import pyaudio
 import wx
 # import wx.lib.scrolledpanel as scrolled
 
@@ -48,8 +52,30 @@ class AudioTestFrame(wx.Frame):
         self.processor.isDebug = False
         # self.processor.isDebug = True
         
+        # Set initial result message with F5 hint
+        self.initial_message = "Audio Test UI started\n"
+        self.initial_message += "Press F5 or click the Refresh button to update the list of available audio devices.\n"
+        self.initial_message += "Select an audio input device from the dropdown menu.\n"
+        
         # Top frame for buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Create combobox for audio device selection
+        device_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        device_label = wx.StaticText(self.panel, label="Audio Input Device:")
+        self.device_combobox = wx.Choice(self.panel, size=(300, -1))
+        self.refresh_btn = wx.Button(self.panel, label="↻ Refresh", size=(90, -1))
+        
+        # Populate the device combobox
+        self.populate_audio_devices()
+        
+        device_sizer.Add(device_label, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
+        device_sizer.Add(self.device_combobox, 1, wx.EXPAND|wx.RIGHT, 5)
+        device_sizer.Add(self.refresh_btn, 0)
+        
+        # Bind device selection event and refresh button
+        self.device_combobox.Bind(wx.EVT_CHOICE, self.on_device_selected)
+        self.refresh_btn.Bind(wx.EVT_BUTTON, self.on_refresh_devices)
         
         # Create buttons
         button_size = wx.Size(35, -1)  # 约等于10个字符宽，70像素可根据实际调整
@@ -68,6 +94,27 @@ class AudioTestFrame(wx.Frame):
         btn_sizer.Add(self.stop_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
         btn_sizer.Add(self.quit_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
         
+        # Add recording prompt text
+        prompt_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.prompt_text = wx.StaticText(self.panel, label="按住空格键开始进行录音 (Hold SPACE to record)")
+        font = self.prompt_text.GetFont()
+        font.SetPointSize(12)
+        font.SetWeight(wx.FONTWEIGHT_BOLD)
+        self.prompt_text.SetFont(font)
+        self.prompt_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
+        
+        # Add recording status indicator
+        self.recording_indicator = wx.StaticText(self.panel, label="⚫")
+        self.recording_indicator.SetFont(font)
+        self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
+        
+        prompt_sizer.Add(self.prompt_text, 0, wx.ALIGN_CENTER_VERTICAL)
+        prompt_sizer.Add((20, -1), 0)  # Spacer
+        prompt_sizer.Add(self.recording_indicator, 0, wx.ALIGN_CENTER_VERTICAL)
+        
+        # Add prompt to main sizer
+        main_sizer.Add(device_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=10)
+        main_sizer.Add(prompt_sizer, proportion=0, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=10)
         main_sizer.Add(btn_sizer, proportion=0, flag=wx.EXPAND)
         
         # Frame for matplotlib plot
@@ -95,6 +142,10 @@ class AudioTestFrame(wx.Frame):
         self.result_text = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE|wx.TE_READONLY)
         self.result_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         
+        # Set initial message with timestamp
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        self.result_text.SetValue(f"{timestamp}: {self.initial_message}")
+        
         result_sizer.Add(result_label, proportion=0, flag=wx.ALIGN_TOP|wx.ALL, border=5)
         result_sizer.Add(self.result_text, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
         
@@ -113,6 +164,29 @@ class AudioTestFrame(wx.Frame):
         
         # Handle window close
         self.Bind(wx.EVT_CLOSE, self.on_close)
+        
+        # Add keyboard accelerator for F5 to refresh devices
+        self.accel_table = wx.AcceleratorTable([
+            (wx.ACCEL_NORMAL, wx.WXK_F5, wx.ID_REFRESH)
+        ])
+        self.SetAcceleratorTable(self.accel_table)
+        self.Bind(wx.EVT_MENU, self.on_refresh_devices, id=wx.ID_REFRESH)
+        
+        # Add keyboard event handlers for space bar recording
+        self.panel.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.panel.Bind(wx.EVT_KEY_UP, self.on_key_up)
+        self.panel.SetFocus()
+        
+        # Recording state variables
+        self.is_recording = False
+        self.recording_start_time = None
+        self.recording_frames = []
+        self.recording_sample_rate = 16000  # Make sure this matches processor's sample rate
+        self.recordings_dir = "recordings"  # Directory to store recordings
+        
+        # Ensure recording directory exists
+        if not os.path.exists(self.recordings_dir):
+            os.makedirs(self.recordings_dir)
         
     def on_start(self, event):
         # if self.processor_started:
@@ -183,6 +257,316 @@ class AudioTestFrame(wx.Frame):
             # 更新文本框并滚动到底部
             self.result_text.SetValue(text)
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
+    
+    def populate_audio_devices(self):
+        """Populate the audio devices dropdown"""
+        try:
+            # Get list of audio devices from processor
+            if self.processor:
+                devices, default_device = self.processor.get_audio_devices()
+                
+                # Store device indices and names
+                self.audio_devices = devices
+                default_device_index = -1
+                
+                # Clear existing items
+                self.device_combobox.Clear()
+                
+                # Add devices to combobox
+                for i, (device_id, name) in enumerate(devices):
+                    self.device_combobox.Append(f"{name} (Device {device_id})")
+                    
+                    # Track the default device's position in the list
+                    if default_device and device_id == default_device[0]:
+                        default_device_index = i
+                
+                # Select default device
+                if default_device_index >= 0:
+                    self.device_combobox.SetSelection(default_device_index)
+                elif len(devices) > 0:
+                    self.device_combobox.SetSelection(0)
+                    
+                # Ensure the processor uses the selected device
+                if len(devices) > 0:
+                    selected_index = default_device_index if default_device_index >= 0 else 0
+                    device_index = devices[selected_index][0]
+                    self.processor.input_device_index = device_index
+                    print(f"Set audio device to {devices[selected_index][1]} (index {device_index})")
+            else:
+                print("Processor not initialized yet, can't get audio devices")
+                
+        except Exception as e:
+            print(f"Error populating audio devices: {e}")
+            traceback.print_exc()
+    
+    def on_device_selected(self, event):
+        """Handle device selection from dropdown"""
+        try:
+            # Temporarily disable UI components during device change
+            self.device_combobox.Disable()
+            self.refresh_btn.Disable()
+            
+            # Update device selection visually
+            selection = self.device_combobox.GetSelection()
+            if selection != wx.NOT_FOUND and selection < len(self.audio_devices):
+                device_index = self.audio_devices[selection][0]
+                device_name = self.audio_devices[selection][1]
+                
+                print(f"Selected audio device: {device_name} (index {device_index})")
+                
+                # Change button color to show processing
+                self.refresh_btn.SetBackgroundColour(wx.Colour(255, 255, 0))  # Yellow
+                self.refresh_btn.SetLabel("Changing...")
+                
+                # Force UI update immediately
+                wx.Yield()
+                
+                # Update the result text to show the selected device
+                current_text = self.result_text.GetValue()
+                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                self.result_text.SetValue(f"{current_text}\n{timestamp}: Changed device to {device_name}")
+                self.result_text.ShowPosition(self.result_text.GetLastPosition())
+                
+                # Update the processor's input device
+                if self.processor:
+                    self.processor.input_device_index = device_index
+                    
+                    # If processor is running, restart it to apply the new device
+                    if self.processor_started:
+                        message = f"To use the new audio device '{device_name}', the processor will be restarted."
+                        wx.MessageBox(message, "Device Changed", wx.OK | wx.ICON_INFORMATION)
+                        self.on_stop(None)
+                        self.on_start(None)
+                        
+                        # Add status message to results
+                        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                        current_text = self.result_text.GetValue()
+                        self.result_text.SetValue(f"{current_text}\n{timestamp}: Processor restarted with new device")
+                        self.result_text.ShowPosition(self.result_text.GetLastPosition())
+                
+                # Reset button appearance when done
+                self.refresh_btn.SetBackgroundColour(wx.NullColour)
+                self.refresh_btn.SetLabel("\u21bb Refresh")
+                
+        except Exception as e:
+            print(f"Error setting audio device: {e}")
+            traceback.print_exc()
+            
+            # Show error in results
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: ERROR: Failed to change audio device - {str(e)}")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
+            # Reset button appearance on error
+            self.refresh_btn.SetBackgroundColour(wx.Colour(255, 200, 200))  # Light red
+            self.refresh_btn.SetLabel("Error")
+            
+        finally:
+            # Re-enable UI components
+            self.device_combobox.Enable()
+            self.refresh_btn.Enable()
+    
+    def on_refresh_devices(self, event):
+        """Refresh the list of audio devices"""
+        try:
+            # Temporarily disable UI components during refresh
+            self.device_combobox.Disable()
+            self.refresh_btn.Disable()
+            self.refresh_btn.SetBackgroundColour(wx.Colour(173, 216, 230))  # Light blue
+            self.refresh_btn.SetLabel("Refreshing...")
+            
+            # Force UI update immediately
+            wx.Yield()
+            
+            print("Refreshing audio devices list...")
+            
+            # Remember the previously selected device name if any
+            prev_selection = self.device_combobox.GetSelection()
+            prev_device_name = None
+            if prev_selection != wx.NOT_FOUND and prev_selection < len(self.audio_devices):
+                prev_device_name = self.audio_devices[prev_selection][1]
+            
+            # Refresh the device list
+            self.populate_audio_devices()
+            
+            # Try to select the previously selected device by name
+            if prev_device_name:
+                for i, (_, name) in enumerate(self.audio_devices):
+                    if name == prev_device_name:
+                        self.device_combobox.SetSelection(i)
+                        break
+            
+            # Add status message to results
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: Audio devices list refreshed")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
+            # Show success visual feedback
+            self.refresh_btn.SetBackgroundColour(wx.Colour(144, 238, 144))  # Light green
+            self.refresh_btn.SetLabel("✓ Updated")
+            
+            # Schedule reset of button appearance after 1 second
+            wx.CallLater(1000, self.reset_refresh_button)
+            
+        except Exception as e:
+            print(f"Error refreshing audio devices: {e}")
+            traceback.print_exc()
+            
+            # Show error in results
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: ERROR: Failed to refresh audio devices - {str(e)}")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
+            # Show error visual feedback
+            self.refresh_btn.SetBackgroundColour(wx.Colour(255, 200, 200))  # Light red
+            self.refresh_btn.SetLabel("✗ Error")
+            
+            # Schedule reset of button appearance after 2 seconds
+            wx.CallLater(2000, self.reset_refresh_button)
+            
+        finally:
+            # Re-enable UI components
+            self.device_combobox.Enable()
+            self.refresh_btn.Enable()
+    
+    def reset_refresh_button(self):
+        """Reset the refresh button to its original appearance"""
+        self.refresh_btn.SetBackgroundColour(wx.NullColour)
+        self.refresh_btn.SetLabel("\u21bb Refresh")
+    
+    def on_key_down(self, event):
+        """Handle key down event for space bar recording"""
+        if event.GetKeyCode() == wx.WXK_SPACE and not self.is_recording:
+            # Start recording
+            self.start_recording()
+        event.Skip()
+    
+    def on_key_up(self, event):
+        """Handle key up event for space bar recording"""
+        if event.GetKeyCode() == wx.WXK_SPACE and self.is_recording:
+            # Stop recording and save
+            self.stop_recording_and_save()
+        event.Skip()
+    
+    def start_recording(self):
+        """Start recording audio"""
+        if not self.processor_started:
+            # If processor not started, show warning and return
+            wx.MessageBox("Please start the VAD/KWS Processor first", "Cannot Record", wx.OK | wx.ICON_INFORMATION)
+            return
+            
+        # Visual feedback - change indicator to red
+        self.recording_indicator.SetLabel("⚫ Recording")
+        self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))  # Red when recording
+        
+        # Set recording state
+        self.is_recording = True
+        self.recording_start_time = datetime.datetime.now()
+        self.recording_frames = []
+        
+        # Log recording start
+        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        current_text = self.result_text.GetValue()
+        self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording started...")
+        self.result_text.ShowPosition(self.result_text.GetLastPosition())
+        
+        # Register callback with processor to capture audio frames
+        if hasattr(self.processor, 'set_audio_callback'):
+            self.processor.set_audio_callback(self.on_audio_frame)
+        else:
+            # Fallback method - direct access to frames
+            print("Warning: set_audio_callback not available, using fallback method")
+            # Reset recording frames and enable collecting in the processor's audio callback
+            self.processor.recording_frames = self.recording_frames
+            self.processor.is_recording = True
+    
+    def on_audio_frame(self, audio_frame):
+        """Callback for receiving audio frames during recording"""
+        if self.is_recording:
+            self.recording_frames.append(audio_frame)
+    
+    def stop_recording_and_save(self):
+        """Stop recording and save the audio file"""
+        if not self.is_recording:
+            return
+            
+        # Visual feedback - change indicator back to gray
+        self.recording_indicator.SetLabel("⚫")
+        self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
+        
+        # Get recognized text from processor for filename
+        recognized_text = "recording"  # Default if no text recognized
+        if hasattr(self.processor, 'last_recognized_text') and self.processor.last_recognized_text:
+            recognized_text = self.processor.last_recognized_text[:30]  # Limit length for filename
+            recognized_text = recognized_text.replace(" ", "_")  # Replace spaces with underscores
+            # Remove any characters that would be invalid in a filename
+            recognized_text = re.sub(r'[\/:*?"<>|]', "", recognized_text)
+        
+        # Generate filename with timestamp and recognized text
+        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"{timestamp}_{recognized_text}.wav"
+        file_path = os.path.join(self.recordings_dir, filename)
+        
+        # Disable recording callback
+        if hasattr(self.processor, 'set_audio_callback'):
+            self.processor.set_audio_callback(None)
+        else:
+            # Fallback method
+            self.processor.is_recording = False
+            # Get frames from processor if using fallback
+            if hasattr(self.processor, 'recording_frames') and self.processor.recording_frames:
+                self.recording_frames = self.processor.recording_frames
+        
+        # Save the audio if we have frames
+        if self.recording_frames:
+            self.save_audio_to_file(file_path)
+            
+            # Log recording saved
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording saved to {filename}")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+        else:
+            # Log no audio captured
+            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: No audio captured during recording")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+        
+        # Reset recording state
+        self.is_recording = False
+        self.recording_frames = []
+    
+    def save_audio_to_file(self, file_path):
+        """Save recorded audio frames to WAV file"""
+        try:
+            import wave
+            import numpy as np
+            
+            # Convert frames to a single array
+            audio_data = np.concatenate(self.recording_frames) if len(self.recording_frames) > 1 else self.recording_frames[0]
+            
+            # Ensure audio_data is float32 in [-1, 1] range
+            if audio_data.dtype != np.int16:
+                # Convert float32 [-1, 1] to int16 [-32768, 32767]
+                audio_data = (audio_data * 32767).astype(np.int16)
+            
+            # Create WAV file
+            with wave.open(file_path, 'wb') as wf:
+                wf.setnchannels(1)  # Mono
+                wf.setsampwidth(2)  # 2 bytes = 16 bits
+                wf.setframerate(self.recording_sample_rate)  # Sample rate
+                wf.writeframes(audio_data.tobytes())
+                
+            print(f"Audio saved to {file_path}")
+            return True
+        except Exception as e:
+            print(f"Error saving audio: {e}")
+            traceback.print_exc()
+            return False
     
     def on_close(self, event):
         # 停止处理器和定时器

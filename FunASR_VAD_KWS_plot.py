@@ -89,6 +89,11 @@ class VADKWSProcessor:
             buffer_duration: Pre-buffer duration in seconds (default: 3.0s)
             keywords: List of keywords to detect (default: None)
         """
+        # Recording support variables
+        self.audio_frame_callback = None
+        self.recording_frames = []
+        self.is_recording = False
+        self.last_recognized_text = ""  # Store most recent recognized text
         # Audio parameters
         self.isDebug = False
         self.sample_rate = sample_rate
@@ -204,22 +209,33 @@ class VADKWSProcessor:
             numdevices = info.get('deviceCount')
             
             print(f"Found {numdevices} audio devices:")
-            for i in range(numdevices):
-                device_info = self.pyaudio.get_device_info_by_host_api_device_index(0, i)
-                if device_info.get('maxInputChannels') > 0:
-                    print(f"Input Device {i}: {device_info.get('name')}")
-                if device_info.get('maxOutputChannels') > 0:
-                    print(f"Output Device {i}: {device_info.get('name')}")
+            input_devices = []
+            default_input_index = None
             
-            # Try to find a suitable input device
             for i in range(numdevices):
-                device_info = self.pyaudio.get_device_info_by_host_api_device_index(0, i)
-                if device_info.get('maxInputChannels') > 0:
-                    self.input_device_index = i
-                    print(f"Using input device {i}: {device_info.get('name')}")
-                    break
+                try:
+                    device_info = self.pyaudio.get_device_info_by_host_api_device_index(0, i)
+                    if device_info.get('maxInputChannels') > 0:
+                        input_devices.append((i, device_info.get('name')))
+                        print(f"Input Device {i}: {device_info.get('name')}")
+                        # Check if this is the default input device
+                        if device_info.get('isDefaultInput', 0) == 1:
+                            default_input_index = i
+                    if device_info.get('maxOutputChannels') > 0:
+                        print(f"Output Device {i}: {device_info.get('name')}")
+                except Exception as e:
+                    print(f"Error getting device {i} info: {e}")
             
-            if self.input_device_index is None:
+            # Try to use default input device first
+            if default_input_index is not None:
+                self.input_device_index = default_input_index
+                device_info = self.pyaudio.get_device_info_by_index(default_input_index)
+                print(f"Using default input device {default_input_index}: {device_info.get('name')}")
+            # Or first available input device
+            elif input_devices:
+                self.input_device_index = input_devices[0][0]
+                print(f"Using input device {self.input_device_index}: {input_devices[0][1]}")
+            else:
                 print("Warning: No input device found!")
                 
         except Exception as e:
@@ -233,6 +249,68 @@ class VADKWSProcessor:
             return torch.cuda.is_available()
         except ImportError:
             return False
+    
+    def set_audio_callback(self, callback_func):
+        """Set or clear a callback function to receive audio frames
+        
+        Args:
+            callback_func: Function to call with audio frames or None to clear
+        """
+        self.audio_frame_callback = callback_func
+        # Reset recording frames when setting a new callback
+        if callback_func is not None:
+            self.recording_frames = []
+            
+    def get_audio_devices(self):
+        """Get list of all available audio input devices
+        
+        Returns:
+            list: List of tuples (device_index, device_name)
+            tuple: Default device as (device_index, device_name) or None
+        """
+        devices = []
+        default_device = None
+        
+        try:
+            # Recreate PyAudio instance to ensure we get fresh device info
+            if hasattr(self, 'pyaudio'):
+                try:
+                    # Only recreate if not streaming
+                    if not (hasattr(self, 'stream') and self.stream and self.stream.is_active()):
+                        self.pyaudio.terminate()
+                        self.pyaudio = pyaudio.PyAudio()
+                        print("Refreshed PyAudio instance for device detection")
+                except Exception as e:
+                    print(f"Warning when refreshing PyAudio: {e}")
+                    # Continue with existing pyaudio instance
+            
+            # Get device count
+            info = self.pyaudio.get_host_api_info_by_index(0)
+            numdevices = info.get('deviceCount')
+            print(f"Found {numdevices} total audio devices")
+            
+            # Find all input devices
+            for i in range(numdevices):
+                try:
+                    device_info = self.pyaudio.get_device_info_by_index(i)
+                    # Only include input devices
+                    if device_info.get('maxInputChannels') > 0:
+                        name = device_info.get('name')
+                        devices.append((i, name))
+                        print(f"Found input device {i}: {name}")
+                        
+                        # Track default device
+                        if device_info.get('isDefaultInput', 0) == 1:
+                            default_device = (i, name)
+                            print(f"Default input device: {name} (index {i})")
+                except Exception as e:
+                    print(f"Error getting device {i} info: {e}")
+        except Exception as e:
+            print(f"Error listing audio devices: {e}")
+            traceback.print_exc()
+            
+        print(f"Found {len(devices)} audio input devices")
+        return devices, default_device
 
     def start(self):
         """Start the VAD/KWS processor"""
@@ -248,7 +326,27 @@ class VADKWSProcessor:
         
         try:
             # Open audio stream
-            if not __name__ == "__main__":                
+            if not __name__ == "__main__":      
+                # If we have an existing stream, close it
+                if hasattr(self, 'stream') and self.stream:
+                    try:
+                        self.stream.stop_stream()
+                        self.stream.close()
+                    except Exception as e:
+                        print(f"Error closing previous stream: {e}")
+                        
+                # Get device info for debug output
+                device_name = "Default Device"
+                if self.input_device_index is not None:
+                    try:
+                        device_info = self.pyaudio.get_device_info_by_index(self.input_device_index)
+                        device_name = device_info.get('name', f"Device {self.input_device_index}")
+                    except Exception:
+                        pass
+                        
+                print(f"Opening audio stream on device: {device_name} (index: {self.input_device_index})")
+                
+                # Open new stream with current device
                 self.stream = self.pyaudio.open(
                     format=self.format,
                     channels=self.channels,
@@ -328,6 +426,14 @@ class VADKWSProcessor:
             # 保存原始音频数据到显示缓冲区
             with self.lock:
                 self.audio_buffer_original.append((audio_data_norm, current_time))
+                
+            # Call audio frame callback if set (for recording feature)
+            if self.audio_frame_callback is not None:
+                self.audio_frame_callback(audio_data_norm)
+            
+            # Direct frame capture method for UI recording
+            if self.is_recording:
+                self.recording_frames.append(audio_data_norm)
                 
             # Put in queue for processing
             try:
