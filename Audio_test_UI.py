@@ -79,9 +79,20 @@ class AudioTestFrame(wx.Frame):
         
         # Create buttons
         button_size = wx.Size(35, -1)  # 约等于10个字符宽，70像素可根据实际调整
-        self.start_btn = wx.Button(self.panel, label="Start VAD/KWS Processor", size=button_size)
-        self.stop_btn = wx.Button(self.panel, label="Stop Processor", size=button_size)
-        self.quit_btn = wx.Button(self.panel, label="Quit", size=button_size)
+        # 修改按钮样式，禁用空格键触发
+        button_style = wx.BU_EXACTFIT | wx.BORDER_NONE | wx.WANTS_CHARS
+        self.start_btn = wx.Button(self.panel, label="Start VAD/KWS Processor", size=button_size, style=button_style)
+        self.stop_btn = wx.Button(self.panel, label="Stop Processor", size=button_size, style=button_style)
+        self.quit_btn = wx.Button(self.panel, label="Quit", size=button_size, style=button_style)
+        
+        # 禁用按钮的 TAB 焦点
+        self.start_btn.SetWindowStyle(self.start_btn.GetWindowStyle() | wx.NO_BORDER)
+        self.stop_btn.SetWindowStyle(self.stop_btn.GetWindowStyle() | wx.NO_BORDER)
+        self.quit_btn.SetWindowStyle(self.quit_btn.GetWindowStyle() | wx.NO_BORDER)
+        
+        # 设置面板接收所有键盘事件
+        self.panel.SetWindowStyle(self.panel.GetWindowStyle() | wx.WANTS_CHARS)
+        
         self.stop_btn.Disable()
         
         # Bind button events
@@ -109,7 +120,7 @@ class AudioTestFrame(wx.Frame):
         self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
         
         prompt_sizer.Add(self.prompt_text, 0, wx.ALIGN_CENTER_VERTICAL)
-        prompt_sizer.Add((20, -1), 0)  # Spacer
+        prompt_sizer.Add((20, -1), 0, wx.ALIGN_CENTER_VERTICAL)  # Spacer
         prompt_sizer.Add(self.recording_indicator, 0, wx.ALIGN_CENTER_VERTICAL)
         
         # Add prompt to main sizer
@@ -173,11 +184,11 @@ class AudioTestFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_refresh_devices, id=wx.ID_REFRESH)
         
         # Add keyboard event handlers for space bar recording
-        self.panel.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
-        self.panel.Bind(wx.EVT_KEY_UP, self.on_key_up)
-        self.panel.SetFocus()
+        self.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.Bind(wx.EVT_KEY_UP, self.on_key_up)
         
         # Recording state variables
+        self.space_pressed = False
         self.is_recording = False
         self.recording_start_time = None
         self.recording_frames = []
@@ -196,6 +207,8 @@ class AudioTestFrame(wx.Frame):
         self.processor_started = True
         self.stop_btn.Enable()
         self.start_btn.Disable()
+        # 将焦点设置到面板上，而不是按钮
+        self.panel.SetFocus()
 
         # 检查是否有新的fig，必要时重建canvas
         # if hasattr(self.processor, 'fig'):
@@ -439,106 +452,54 @@ class AudioTestFrame(wx.Frame):
     
     def on_key_down(self, event):
         """Handle key down event for space bar recording"""
-        if event.GetKeyCode() == wx.WXK_SPACE and not self.is_recording:
-            # Start recording
-            self.start_recording()
+        # if event.GetKeyCode() == wx.WXK_SPACE:
+        #     if not self.space_pressed and not self.is_recording:
+        #         self.space_pressed = True
+        #         self.start_recording()
+        #     return  # 阻止事件继续传播
         event.Skip()
     
     def on_key_up(self, event):
         """Handle key up event for space bar recording"""
-        if event.GetKeyCode() == wx.WXK_SPACE and self.is_recording:
-            # Stop recording and save
-            self.stop_recording_and_save()
+        # if event.GetKeyCode() == wx.WXK_SPACE:
+        #     if self.space_pressed and self.is_recording:
+        #         self.space_pressed = False
+        #         self.stop_recording_and_save()
+        #     return  # 阻止事件继续传播
         event.Skip()
     
     def start_recording(self):
-        """Start recording audio"""
+        """Start recording when space is pressed"""
         if not self.processor_started:
-            # If processor not started, show warning and return
-            wx.MessageBox("Please start the VAD/KWS Processor first", "Cannot Record", wx.OK | wx.ICON_INFORMATION)
+            wx.MessageBox("Please start the VAD/KWS processor first", "Warning")
             return
-            
-        # Visual feedback - change indicator to red
-        self.recording_indicator.SetLabel("⚫ Recording")
-        self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))  # Red when recording
         
-        # Set recording state
         self.is_recording = True
+        # 更改录音指示器颜色为红色
+        self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
         self.recording_start_time = datetime.datetime.now()
-        self.recording_frames = []
+        self.frames = []  # 清空之前的录音
         
-        # Log recording start
+        # 显示录音开始信息
         timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-        current_text = self.result_text.GetValue()
-        self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording started...")
-        self.result_text.ShowPosition(self.result_text.GetLastPosition())
-        
-        # Register callback with processor to capture audio frames
-        if hasattr(self.processor, 'set_audio_callback'):
-            self.processor.set_audio_callback(self.on_audio_frame)
-        else:
-            # Fallback method - direct access to frames
-            print("Warning: set_audio_callback not available, using fallback method")
-            # Reset recording frames and enable collecting in the processor's audio callback
-            self.processor.recording_frames = self.recording_frames
-            self.processor.is_recording = True
-    
-    def on_audio_frame(self, audio_frame):
-        """Callback for receiving audio frames during recording"""
-        if self.is_recording:
-            self.recording_frames.append(audio_frame)
+        self.result_text.AppendText(f"\n{timestamp}: Recording started...")
     
     def stop_recording_and_save(self):
-        """Stop recording and save the audio file"""
-        if not self.is_recording:
-            return
+        """Stop recording and save when space is released"""
+        if self.is_recording:
+            self.is_recording = False
+            # 恢复录音指示器颜色为灰色
+            self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))
             
-        # Visual feedback - change indicator back to gray
-        self.recording_indicator.SetLabel("⚫")
-        self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
-        
-        # Get recognized text from processor for filename
-        recognized_text = "recording"  # Default if no text recognized
-        if hasattr(self.processor, 'last_recognized_text') and self.processor.last_recognized_text:
-            recognized_text = self.processor.last_recognized_text[:30]  # Limit length for filename
-            recognized_text = recognized_text.replace(" ", "_")  # Replace spaces with underscores
-            # Remove any characters that would be invalid in a filename
-            recognized_text = re.sub(r'[\/:*?"<>|]', "", recognized_text)
-        
-        # Generate filename with timestamp and recognized text
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{timestamp}_{recognized_text}.wav"
-        file_path = os.path.join(self.recordings_dir, filename)
-        
-        # Disable recording callback
-        if hasattr(self.processor, 'set_audio_callback'):
-            self.processor.set_audio_callback(None)
-        else:
-            # Fallback method
-            self.processor.is_recording = False
-            # Get frames from processor if using fallback
-            if hasattr(self.processor, 'recording_frames') and self.processor.recording_frames:
-                self.recording_frames = self.processor.recording_frames
-        
-        # Save the audio if we have frames
-        if self.recording_frames:
-            self.save_audio_to_file(file_path)
-            
-            # Log recording saved
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-            current_text = self.result_text.GetValue()
-            self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording saved to {filename}")
-            self.result_text.ShowPosition(self.result_text.GetLastPosition())
-        else:
-            # Log no audio captured
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-            current_text = self.result_text.GetValue()
-            self.result_text.SetValue(f"{current_text}\n{timestamp}: No audio captured during recording")
-            self.result_text.ShowPosition(self.result_text.GetLastPosition())
-        
-        # Reset recording state
-        self.is_recording = False
-        self.recording_frames = []
+            if self.frames:  # 如果有录音数据
+                # 生成文件名
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"recordings/record_{timestamp}.wav"
+                self.save_audio_to_file(filename)
+                
+                # 显示保存信息
+                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                self.result_text.AppendText(f"\n{timestamp}: Recording saved to {filename}")
     
     def save_audio_to_file(self, file_path):
         """Save recorded audio frames to WAV file"""

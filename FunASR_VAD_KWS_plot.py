@@ -579,7 +579,7 @@ class VADKWSProcessor:
             # Filter buffer data within display window for speech only
             filtered_speech = [
                 (chunk, ts) for chunk, ts in audio_buffer_speech 
-                if ts + (len(chunk) / self.sample_rate) >= start_time
+                if ts is not None and ts + (len(chunk) / self.sample_rate) >= start_time
             ]
             
             for audio_chunk, chunk_start_time in filtered_speech:
@@ -944,7 +944,14 @@ class VADKWSProcessor:
                 search_end = min(buffer_len, start_pos + MAX_CHUNK)
                 for i in range(search_start, search_end, SLIP_WINDOW_SIZE):
                     window_end = min(i + SLIP_WINDOW_SIZE, search_end)
-                    end_time = speech_start_time + (window_end - start_pos) / self.sample_rate
+                    if speech_start_time is not None:
+                        end_time = speech_start_time + (window_end - start_pos) / self.sample_rate
+                    else:
+                        # 如果 speech_start_time 为 None，使用当前时间或其他适当的默认值
+                        end_time = time.time() - (window_end - start_pos) / self.sample_rate
+                        if self.isDebug:
+                            print(f"Warning: speech_start_time was None, using estimated time")
+                    
                     window = audio_buffer_kws[i:window_end]
                     if window.size == 0:
                         continue
