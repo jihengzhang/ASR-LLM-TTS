@@ -148,11 +148,13 @@ class AudioTestFrame(wx.Frame):
         
         main_sizer.Add(self.plot_panel, proportion=8, flag=wx.EXPAND|wx.ALL, border=10)
         
-        # Text box for KWS/ASR results
-        result_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        # Text box for KWS/ASR results with label at the top
+        result_sizer = wx.BoxSizer(wx.VERTICAL)
+        
+        # Add title at the top, spanning full width
         result_label = wx.StaticText(self.panel, label="KWS/ASR Results:", 
                                     style=wx.ALIGN_LEFT)
-        result_label.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        result_label.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         
         self.result_text = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE|wx.TE_READONLY)
         self.result_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
@@ -161,10 +163,22 @@ class AudioTestFrame(wx.Frame):
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.result_text.SetValue(f"{timestamp}: {self.initial_message}")
         
-        result_sizer.Add(result_label, proportion=0, flag=wx.ALIGN_TOP|wx.ALL, border=5)
-        result_sizer.Add(self.result_text, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
+        result_sizer.Add(result_label, proportion=0, flag=wx.EXPAND|wx.BOTTOM, border=5)
+        result_sizer.Add(self.result_text, proportion=1, flag=wx.EXPAND)
         
         main_sizer.Add(result_sizer, proportion=2, flag=wx.EXPAND|wx.ALL, border=10)
+        
+        # Add status bar at the bottom of the UI
+        status_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.status_text = wx.StaticText(self.panel, label="Status: Waiting for keyword", 
+                                      style=wx.ALIGN_LEFT)
+        self.status_text.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        self.status_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
+        
+        status_sizer.Add(self.status_text, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
+        
+        # Add status bar to main sizer
+        main_sizer.Add(status_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
         
         self.panel.SetSizer(main_sizer)
         
@@ -284,6 +298,10 @@ class AudioTestFrame(wx.Frame):
             # 更新文本框并滚动到底部
             self.result_text.SetValue(text)
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
+            # Update status text at the bottom of UI
+            if hasattr(self.processor, 'status'):
+                self.status_text.SetLabel(f"Status: {self.processor.status}")
     
     def populate_audio_devices(self):
         """Populate the audio devices dropdown"""

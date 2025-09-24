@@ -628,12 +628,10 @@ class VADKWSProcessor:
         self.speech_line, = self.ax2.plot([], [], 'b-', linewidth=1.0, label='Speech')
         self.vad_line, = self.ax1.plot([], [], 'r-', linewidth=1.5, label='Keyword Active')
         
-        # Add status indicator
-        self.status_text = self.fig.text(
-            0.01, 0.01, 'Status: Initializing',
-            fontsize=10,
-            bbox=dict(facecolor='white', alpha=0.7)
-        )
+        # Remove status text from figure - will be shown in UI instead
+        self.status = 'Initializing'
+        # Create a placeholder for status text that will be used by the UI
+        self.status_text = None
 
         plt.ion()
         self.fig.canvas.draw()
@@ -840,8 +838,8 @@ class VADKWSProcessor:
             
             self.ax1.legend(loc='upper left')
 
-            # self.ax1.set_xlim(start_time, current_time)
-            self.ax1.set_xlim(time.time()-20, time.time())
+            self.ax1.set_xlim(start_time, current_time)
+            # self.ax1.set_xlim(time.time()-20, time.time())
             self.ax1.set_ylim(-1.0, 1.0)
             # 设置精确的y轴刻度间隔为0.1
             yticks = np.arange(-1.0, 1.1, 0.5)
@@ -906,8 +904,8 @@ class VADKWSProcessor:
                 #                        color='green', alpha=0.2)
 
             self.ax2.legend(loc='upper left')
-            # self.ax2.set_xlim(start_time, current_time)
-            self.ax2.set_xlim(time.time()-20, time.time())
+            self.ax2.set_xlim(start_time, current_time)
+            # self.ax2.set_xlim(time.time()-20, time.time())
             self.ax2.set_ylim(-1.0, 1.0)
             # 设置精确的y轴刻度间隔为0.1
             yticks = np.arange(-1.0, 1.1, 0.5)
@@ -918,8 +916,8 @@ class VADKWSProcessor:
             # 更新关键词显示子图 (ax3) - now includes keyword status history
             self.ax3.clear()
             self.ax3.set_title('Detected Keywords & Keyword Status')
-            # self.ax3.set_xlim(start_time, current_time)
-            self.ax3.set_xlim(time.time()-20, time.time())
+            self.ax3.set_xlim(start_time, current_time)
+            # self.ax3.set_xlim(time.time()-20, time.time())
             self.ax3.set_ylim(-0.1, 1.1)
             # 设置精确的y轴刻度间隔为0.1
             yticks = np.arange(-0.1, 1.2, 0.5)
@@ -983,7 +981,8 @@ class VADKWSProcessor:
             
             # Update status text
             status = "Listening..." if keyword_detected else "Waiting for keyword"
-            self.status_text.set_text(f'Status: {status}')
+            # Store status string for UI to display
+            self.status = status
             
             # Adjust layout with consistent padding
             # Use subplots_adjust instead of tight_layout for better control
