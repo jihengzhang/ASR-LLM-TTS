@@ -93,6 +93,10 @@ class VADKWSProcessor:
         self.audio_frame_callback = None
         self.recording_frames = []
         self.is_recording = False
+        self.recording_start_time = None
+        self.recordings_dir = "recordings"
+        if not os.path.exists(self.recordings_dir):
+            os.makedirs(self.recordings_dir)
         self.last_recognized_text = ""  # Store most recent recognized text
         # Audio parameters
         self.isDebug = False
@@ -260,7 +264,108 @@ class VADKWSProcessor:
         # Reset recording frames when setting a new callback
         if callback_func is not None:
             self.recording_frames = []
+    
+    def start_recording(self):
+        """Start recording audio
+        
+        Returns:
+            bool: True if recording started successfully, False otherwise
+        """
+        if not self.running:
+            print("Warning: Cannot start recording - processor not running")
+            return False
+        
+        self.is_recording = True
+        self.recording_frames = []  # 清空之前的录音
+        self.recording_start_time = time.time()
+        
+        if self.isDebug:
+            print(f"Recording started at {datetime.fromtimestamp(self.recording_start_time).strftime('%H:%M:%S')}")
+        
+        return True
+    
+    def stop_recording(self):
+        """Stop recording audio
+        
+        Returns:
+            list: Recorded audio frames or None if no recording was in progress
+        """
+        if not self.is_recording:
+            return None
+        
+        self.is_recording = False
+        
+        if not self.recording_frames:
+            if self.isDebug:
+                print("No audio data recorded")
+            return None
+        
+        if self.isDebug:
+            duration = sum(len(frame) for frame in self.recording_frames) / self.sample_rate
+            print(f"Recording stopped, {len(self.recording_frames)} frames, {duration:.2f} seconds")
+        
+        return self.recording_frames
+    
+    def save_recording(self, filename=None):
+        """Save recorded audio to file
+        
+        Args:
+            filename: Optional filename to save to. If None, a filename will be generated
+                    using the last detected keyword and timestamp.
+        
+        Returns:
+            str: Path to the saved file or None if saving failed
+        """
+        if not self.recording_frames:
+            print("No audio data to save")
+            return None
+        
+        try:
+            import wave
+            import numpy as np
+            import re
             
+            # 如果没有提供文件名，生成一个带有最后检测到的关键词的文件名
+            if filename is None:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                
+                # 获取最近的关键词检测结果（如果有）
+                last_keyword = "recording"
+                if hasattr(self, 'detected_keywords') and self.detected_keywords:
+                    last_kw_info = self.detected_keywords[-1]
+                    if isinstance(last_kw_info, tuple) and len(last_kw_info) >= 1:
+                        last_keyword = last_kw_info[0]
+                    # 移除文件名中的非法字符
+                    last_keyword = re.sub(r'[\\/*?:"<>|]', '', last_keyword)
+                
+                filename = os.path.join(self.recordings_dir, f"{last_keyword}_{timestamp}.wav")
+            
+            # 将所有音频帧合并到一个数组中
+            audio_data = np.concatenate(self.recording_frames)
+            
+            # 确保音频数据为int16格式 (已经是int16，无需转换)
+            if audio_data.dtype != np.int16:
+                audio_data = (audio_data * 32767).astype(np.int16)
+            
+            # 创建WAV文件
+            with wave.open(filename, 'wb') as wf:
+                wf.setnchannels(1)  # 单声道
+                wf.setsampwidth(2)  # 2字节 = 16位
+                wf.setframerate(self.sample_rate)  # 采样率
+                wf.writeframes(audio_data.tobytes())
+            
+            if self.isDebug:
+                print(f"Audio saved to {filename}")
+            
+            # 保存最后识别的文本，用于UI显示
+            self.last_recognized_text = last_keyword
+            
+            return filename
+        
+        except Exception as e:
+            print(f"Error saving audio: {e}")
+            traceback.print_exc()
+            return None
     def get_audio_devices(self):
         """Get list of all available audio input devices
         
@@ -431,9 +536,14 @@ class VADKWSProcessor:
             if self.audio_frame_callback is not None:
                 self.audio_frame_callback(audio_data_norm)
             
-            # Direct frame capture method for UI recording
+            # 如果正在录音，保存音频数据到录音缓冲区
             if self.is_recording:
-                self.recording_frames.append(audio_data_norm)
+                # 保存原始数据用于WAV文件保存（保持int16格式）
+                self.recording_frames.append(audio_data.copy())
+                if self.isDebug:
+                    if len(self.recording_frames) % 10 == 0:  # 每10帧输出一次，避免过多日志
+                        duration = sum(len(frame) for frame in self.recording_frames) / self.sample_rate
+                        print(f"Recording: {len(self.recording_frames)} frames, {duration:.2f} seconds")
                 
             # Put in queue for processing
             try:

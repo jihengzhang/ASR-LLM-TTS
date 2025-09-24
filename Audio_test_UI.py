@@ -7,7 +7,7 @@ import sys
 import os
 import re
 import threading
-import datetime
+from datetime import datetime
 import traceback
 import pyaudio
 import wx
@@ -79,16 +79,20 @@ class AudioTestFrame(wx.Frame):
         
         # Create buttons
         button_size = wx.Size(35, -1)  # 约等于10个字符宽，70像素可根据实际调整
-        # 修改按钮样式，禁用空格键触发
-        button_style = wx.BU_EXACTFIT | wx.BORDER_NONE | wx.WANTS_CHARS
+        
+        # 使用特殊样式创建按钮，禁用空格键触发和TAB焦点
+        button_style = wx.BORDER_NONE  # 不使用WANTS_CHARS，因为它会捕获空格键
+        
         self.start_btn = wx.Button(self.panel, label="Start VAD/KWS Processor", size=button_size, style=button_style)
         self.stop_btn = wx.Button(self.panel, label="Stop Processor", size=button_size, style=button_style)
         self.quit_btn = wx.Button(self.panel, label="Quit", size=button_size, style=button_style)
         
-        # 禁用按钮的 TAB 焦点
-        self.start_btn.SetWindowStyle(self.start_btn.GetWindowStyle() | wx.NO_BORDER)
-        self.stop_btn.SetWindowStyle(self.stop_btn.GetWindowStyle() | wx.NO_BORDER)
-        self.quit_btn.SetWindowStyle(self.quit_btn.GetWindowStyle() | wx.NO_BORDER)
+        # 禁用按钮的TAB焦点和空格键激活
+        for btn in [self.start_btn, self.stop_btn, self.quit_btn]:
+            # 设置样式标志
+            btn.SetWindowStyleFlag(btn.GetWindowStyleFlag() | wx.NO_BORDER | wx.WANTS_CHARS)
+            # 绑定空格键事件来阻止默认行为
+            btn.Bind(wx.EVT_KEY_DOWN, self.on_button_key_down)
         
         # 设置面板接收所有键盘事件
         self.panel.SetWindowStyle(self.panel.GetWindowStyle() | wx.WANTS_CHARS)
@@ -154,7 +158,7 @@ class AudioTestFrame(wx.Frame):
         self.result_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         
         # Set initial message with timestamp
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+        timestamp = datetime.now().strftime('%H:%M:%S')
         self.result_text.SetValue(f"{timestamp}: {self.initial_message}")
         
         result_sizer.Add(result_label, proportion=0, flag=wx.ALIGN_TOP|wx.ALL, border=5)
@@ -184,8 +188,15 @@ class AudioTestFrame(wx.Frame):
         self.Bind(wx.EVT_MENU, self.on_refresh_devices, id=wx.ID_REFRESH)
         
         # Add keyboard event handlers for space bar recording
-        self.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
-        self.Bind(wx.EVT_KEY_UP, self.on_key_up)
+        self.Bind(wx.EVT_KEY_DOWN, self.on_frame_key_down)
+        self.Bind(wx.EVT_KEY_UP, self.on_frame_key_up)
+        
+        # Important: Also bind keyboard events directly to the panel
+        self.panel.Bind(wx.EVT_KEY_DOWN, self.on_key_down)
+        self.panel.Bind(wx.EVT_KEY_UP, self.on_key_up)
+        
+        # Make the panel able to receive keyboard focus
+        self.panel.SetFocusIgnoringChildren()
         
         # Recording state variables
         self.space_pressed = False
@@ -207,8 +218,11 @@ class AudioTestFrame(wx.Frame):
         self.processor_started = True
         self.stop_btn.Enable()
         self.start_btn.Disable()
+        
         # 将焦点设置到面板上，而不是按钮
-        self.panel.SetFocus()
+        wx.CallAfter(self.panel.SetFocusIgnoringChildren)  # 使用CallAfter确保在UI更新完成后设置焦点并忽略子控件
+        # 确保面板能够捕获按键事件
+        wx.CallAfter(self.panel.SetFocus)
 
         # 检查是否有新的fig，必要时重建canvas
         # if hasattr(self.processor, 'fig'):
@@ -262,7 +276,7 @@ class AudioTestFrame(wx.Frame):
             for kw, ts in list(self.processor.detected_keywords)[-10:]:
                 # 格式化时间戳
                 if isinstance(ts, float):
-                    ts_str = datetime.datetime.fromtimestamp(ts).strftime('%H:%M:%S')
+                    ts_str = datetime.fromtimestamp(ts).strftime('%H:%M:%S')
                 else:
                     ts_str = str(ts)
                 text += f"{ts_str}: {kw}\n"
@@ -336,7 +350,7 @@ class AudioTestFrame(wx.Frame):
                 
                 # Update the result text to show the selected device
                 current_text = self.result_text.GetValue()
-                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                timestamp = datetime.now().strftime('%H:%M:%S')
                 self.result_text.SetValue(f"{current_text}\n{timestamp}: Changed device to {device_name}")
                 self.result_text.ShowPosition(self.result_text.GetLastPosition())
                 
@@ -352,7 +366,7 @@ class AudioTestFrame(wx.Frame):
                         self.on_start(None)
                         
                         # Add status message to results
-                        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+                        timestamp = datetime.now().strftime('%H:%M:%S')
                         current_text = self.result_text.GetValue()
                         self.result_text.SetValue(f"{current_text}\n{timestamp}: Processor restarted with new device")
                         self.result_text.ShowPosition(self.result_text.GetLastPosition())
@@ -366,7 +380,7 @@ class AudioTestFrame(wx.Frame):
             traceback.print_exc()
             
             # Show error in results
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            timestamp = datetime.now().strftime('%H:%M:%S')
             current_text = self.result_text.GetValue()
             self.result_text.SetValue(f"{current_text}\n{timestamp}: ERROR: Failed to change audio device - {str(e)}")
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
@@ -411,7 +425,7 @@ class AudioTestFrame(wx.Frame):
                         break
             
             # Add status message to results
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            timestamp = datetime.now().strftime('%H:%M:%S')
             current_text = self.result_text.GetValue()
             self.result_text.SetValue(f"{current_text}\n{timestamp}: Audio devices list refreshed")
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
@@ -428,7 +442,7 @@ class AudioTestFrame(wx.Frame):
             traceback.print_exc()
             
             # Show error in results
-            timestamp = datetime.datetime.now().strftime('%H:%M:%S')
+            timestamp = datetime.now().strftime('%H:%M:%S')
             current_text = self.result_text.GetValue()
             self.result_text.SetValue(f"{current_text}\n{timestamp}: ERROR: Failed to refresh audio devices - {str(e)}")
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
@@ -452,82 +466,121 @@ class AudioTestFrame(wx.Frame):
     
     def on_key_down(self, event):
         """Handle key down event for space bar recording"""
-        # if event.GetKeyCode() == wx.WXK_SPACE:
-        #     if not self.space_pressed and not self.is_recording:
-        #         self.space_pressed = True
-        #         self.start_recording()
-        #     return  # 阻止事件继续传播
+        # 记录按键动作以便调试
+        key_code = event.GetKeyCode()
+        
+        # 阻止空格键的默认行为（激活按钮）
+        if key_code == wx.WXK_SPACE:
+            # 打印调试信息到结果区域
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: Space key pressed")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
+            # 立即阻止事件继续传播，防止按钮激活
+            if not self.space_pressed:
+                # 只有当处理器已启动时才开始录音
+                if not self.processor_started:
+                    wx.MessageBox("Please start the VAD/KWS processor first", "Warning", 
+                                 wx.OK | wx.ICON_INFORMATION)
+                else:
+                    self.space_pressed = True
+                    # 使用处理器的录音功能
+                    if self.processor.start_recording():
+                        # 更改录音指示器颜色为红色
+                        self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
+                        self.recording_indicator.SetLabel("⚫ Recording")
+                        
+                        # 更新UI以反映录音状态
+                        timestamp = datetime.now().strftime('%H:%M:%S')
+                        self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording started...")
+                        self.result_text.ShowPosition(self.result_text.GetLastPosition())
+                    else:
+                        # 录音启动失败，记录错误信息
+                        self.space_pressed = False
+                        self.result_text.SetValue(f"{current_text}\n{timestamp}: Failed to start recording")
+                        self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            # 无论如何都不传播空格键事件
+            return
+        # 其他键正常处理
+        event.Skip()
+    
+    def on_frame_key_down(self, event):
+        """Frame-level key down handler - 转发所有事件到panel"""
+        # 将所有键盘事件转发到面板以确保一致处理
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            # 阻止空格键的默认按钮行为
+            self.panel.SetFocusIgnoringChildren()  # 确保焦点在面板上且忽略子控件
+            
+            # 创建一个新的键盘事件并发送到面板，这样事件就能被面板处理
+            new_event = wx.KeyEvent(wx.wxEVT_KEY_DOWN)
+            new_event.m_keyCode = wx.WXK_SPACE
+            wx.PostEvent(self.panel, new_event)
+            return
+        event.Skip()
+    
+    def on_frame_key_up(self, event):
+        """Frame-level key up handler - 转发所有事件到panel"""
+        # 将所有键盘事件转发到面板以确保一致处理
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            self.panel.SetFocus()  # 确保焦点在面板上
+            self.on_key_up(event)  # 直接调用面板的按键处理
+            return
         event.Skip()
     
     def on_key_up(self, event):
         """Handle key up event for space bar recording"""
-        # if event.GetKeyCode() == wx.WXK_SPACE:
-        #     if self.space_pressed and self.is_recording:
-        #         self.space_pressed = False
-        #         self.stop_recording_and_save()
-        #     return  # 阻止事件继续传播
-        event.Skip()
-    
-    def start_recording(self):
-        """Start recording when space is pressed"""
-        if not self.processor_started:
-            wx.MessageBox("Please start the VAD/KWS processor first", "Warning")
-            return
-        
-        self.is_recording = True
-        # 更改录音指示器颜色为红色
-        self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
-        self.recording_start_time = datetime.datetime.now()
-        self.frames = []  # 清空之前的录音
-        
-        # 显示录音开始信息
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-        self.result_text.AppendText(f"\n{timestamp}: Recording started...")
-    
-    def stop_recording_and_save(self):
-        """Stop recording and save when space is released"""
-        if self.is_recording:
-            self.is_recording = False
+        if event.GetKeyCode() == wx.WXK_SPACE and self.space_pressed:
+            self.space_pressed = False
+            
+            # 停止处理器中的录音并保存
+            self.processor.stop_recording()
+            filename = self.processor.save_recording()
+            
             # 恢复录音指示器颜色为灰色
             self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))
+            self.recording_indicator.SetLabel("⚫")
             
-            if self.frames:  # 如果有录音数据
-                # 生成文件名
-                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-                filename = f"recordings/record_{timestamp}.wav"
-                self.save_audio_to_file(filename)
+            # 更新UI以反映录音已停止和保存
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            
+            # 检查是否成功保存了文件
+            if filename:
+                # 获取最后识别的文本作为文件名的一部分
+                recognized_text = self.processor.last_recognized_text or "recording"
+                self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording saved as '{os.path.basename(filename)}'")
+            else:
+                self.result_text.SetValue(f"{current_text}\n{timestamp}: No audio recorded")
                 
-                # 显示保存信息
-                timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-                self.result_text.AppendText(f"\n{timestamp}: Recording saved to {filename}")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            return  # 阻止事件继续传播
+            
+        event.Skip()
     
-    def save_audio_to_file(self, file_path):
-        """Save recorded audio frames to WAV file"""
-        try:
-            import wave
-            import numpy as np
+    # 注意：录音功能现在由 VADKWSProcessor 类实现
+    # 旧的录音方法已移除，现在使用 processor.start_recording() 和 processor.save_recording()
+    
+    def on_button_key_down(self, event):
+        """处理按钮上的键盘事件，防止空格键激活按钮"""
+        # 如果是空格键，完全阻止事件并返回
+        if event.GetKeyCode() == wx.WXK_SPACE:
+            # 将焦点设回面板
+            self.panel.SetFocusIgnoringChildren()
             
-            # Convert frames to a single array
-            audio_data = np.concatenate(self.recording_frames) if len(self.recording_frames) > 1 else self.recording_frames[0]
+            # 记录调试信息
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: Space intercepted from button")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
             
-            # Ensure audio_data is float32 in [-1, 1] range
-            if audio_data.dtype != np.int16:
-                # Convert float32 [-1, 1] to int16 [-32768, 32767]
-                audio_data = (audio_data * 32767).astype(np.int16)
-            
-            # Create WAV file
-            with wave.open(file_path, 'wb') as wf:
-                wf.setnchannels(1)  # Mono
-                wf.setsampwidth(2)  # 2 bytes = 16 bits
-                wf.setframerate(self.recording_sample_rate)  # Sample rate
-                wf.writeframes(audio_data.tobytes())
-                
-            print(f"Audio saved to {file_path}")
-            return True
-        except Exception as e:
-            print(f"Error saving audio: {e}")
-            traceback.print_exc()
-            return False
+            # 转发空格键事件到面板的处理器
+            new_event = wx.KeyEvent(wx.wxEVT_KEY_DOWN)
+            new_event.m_keyCode = wx.WXK_SPACE
+            wx.PostEvent(self.panel, new_event)
+            return
+        # 其他键正常处理
+        event.Skip()
     
     def on_close(self, event):
         # 停止处理器和定时器
