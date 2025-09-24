@@ -73,7 +73,7 @@ class VADKWSProcessor:
     """
     def __init__(self, sample_rate=16000, chunk_size=1600, channels=1,
                  format=pyaudio.paInt16, threshold=0.01,
-                 silence_duration=2.0, vad_interval=0.25, 
+                 silence_duration=1.5, vad_interval=0.25, 
                  buffer_duration=3.0, keywords=None, stopwords="stop", time_to_end_conversation=10):
         """
         Initialize the processor
@@ -600,25 +600,26 @@ class VADKWSProcessor:
         plt.rcParams['axes.unicode_minus'] = False
 
         # Create figure with subplots - now using 3 subplots
-        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(12, 8), 
-                                                      gridspec_kw={'height_ratios': [2, 2, 1]})
-        self.fig.tight_layout(pad=3.0)
+        self.fig, (self.ax1, self.ax2, self.ax3) = plt.subplots(3, 1, figsize=(14, 8), 
+                                                      gridspec_kw={'height_ratios': [2, 2, 1], 'hspace': 0.5})
+        # Adjust the layout to reduce left/right margins
+        self.fig.subplots_adjust(left=0.07, right=0.95, top=0.95, bottom=0.07)
 
         # Configure original audio waveform subplot
-        self.ax1.set_title('Original Audio')
+        self.ax1.set_title('Original Audio', pad=5)
         self.ax1.set_ylim(-0.5, 0.5)
         self.ax1.set_ylabel('Amplitude')
         self.ax1.grid(True)
 
         # Configure detected speech subplot
-        self.ax2.set_title('Detected Speech')
+        self.ax2.set_title('Mean filtered audio and VAD Detection', pad=5)
         self.ax2.set_ylim(-0.5, 0.5)
         self.ax2.set_ylabel('Amplitude')
         self.ax2.grid(True)
 
         # Configure keywords subplot
-        self.ax3.set_title('Detected Keywords')
-        self.ax3.set_xlabel('Time (s)')
+        self.ax3.set_title('Detected Keywords & Keyword Status', pad=5)
+        self.ax3.set_xlabel('Time (s)', labelpad=8)
         self.ax3.set_ylabel('Keywords')
         self.ax3.grid(True)
         
@@ -639,7 +640,7 @@ class VADKWSProcessor:
 
         self.animation = FuncAnimation(
             self.fig, self.update_plot,
-            interval=50,
+            interval=100,
             blit=False,
             repeat=True,
             cache_frame_data=False
@@ -682,15 +683,18 @@ class VADKWSProcessor:
                 return []  # Return empty list since we're not using blit=True
 
             # Use timestamps from audio buffer instead of current time
-            # 获取当前时间
-            current_time = time.time()
-            
-            # 固定显示窗口为20秒，并使用整数时间来减少跳动
-            display_window = 20  # 固定窗口20秒
-            
-            # 将当前时间取整到秒，避免毫秒级的小幅跳动
-            rounded_current_time = int(current_time) + 1.0  # 向上取整到下一秒，增加稳定性
-            start_time = rounded_current_time - display_window
+            if audio_buffer_original:
+                last_chunk, last_timestamp = audio_buffer_original[-1]
+                current_time_0 = last_timestamp + (len(last_chunk) / self.sample_rate)  # Add duration of last chunk
+            else:
+                current_time_0 = time.time()
+            if self.running:
+                current_time = time.time()
+            else:
+                current_time = current_time_0
+
+            display_window = 20  # Show last 20 seconds
+            start_time = current_time - display_window
 
             # 处理原始音频数据 in ax1
             all_original_audio = []
@@ -826,19 +830,22 @@ class VADKWSProcessor:
                         last_level = level
                         last_time = ts
                     
-                    # Add final point using rounded time
-                    level_times.append(rounded_current_time)
+                    # Add final point
+                    level_times.append(current_time)
                     level_values.append(last_level)
                     
                     # Plot speech level line in ax1
                     self.ax1.plot(level_times, level_values, 'b-', 
                                  linewidth=2.0, alpha=0.7, label='Speech Level')
             
-            self.ax1.legend(loc='upper right')
+            self.ax1.legend(loc='upper left')
 
-            # 设置固定的时间轴范围
-            self.ax1.set_xlim(start_time, rounded_current_time)
+            # self.ax1.set_xlim(start_time, current_time)
+            self.ax1.set_xlim(time.time()-20, time.time())
             self.ax1.set_ylim(-1.0, 1.0)
+            # 设置精确的y轴刻度间隔为0.1
+            yticks = np.arange(-1.0, 1.1, 0.5)
+            self.ax1.set_yticks(yticks)
             self.ax1.grid(True)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
@@ -884,8 +891,8 @@ class VADKWSProcessor:
                     last_level = level
                     last_time = ts
                 
-                # Add final point using rounded time
-                vad_times.append(rounded_current_time)
+                # Add final point
+                vad_times.append(current_time)
                 vad_values.append(last_level)
                 
                 # Plot VAD line
@@ -898,19 +905,25 @@ class VADKWSProcessor:
                 #         self.ax2.axvspan(vad_times[i], vad_times[i+1], 
                 #                        color='green', alpha=0.2)
 
-            self.ax2.legend(loc='upper right')
-            # 设置固定的时间轴范围
-            self.ax2.set_xlim(start_time, rounded_current_time)
+            self.ax2.legend(loc='upper left')
+            # self.ax2.set_xlim(start_time, current_time)
+            self.ax2.set_xlim(time.time()-20, time.time())
             self.ax2.set_ylim(-1.0, 1.0)
+            # 设置精确的y轴刻度间隔为0.1
+            yticks = np.arange(-1.0, 1.1, 0.5)
+            self.ax2.set_yticks(yticks)
             self.ax2.grid(True)
             self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
 
             # 更新关键词显示子图 (ax3) - now includes keyword status history
             self.ax3.clear()
             self.ax3.set_title('Detected Keywords & Keyword Status')
-            # 设置固定的时间轴范围
-            self.ax3.set_xlim(start_time, rounded_current_time)
+            # self.ax3.set_xlim(start_time, current_time)
+            self.ax3.set_xlim(time.time()-20, time.time())
             self.ax3.set_ylim(-0.1, 1.1)
+            # 设置精确的y轴刻度间隔为0.1
+            yticks = np.arange(-0.1, 1.2, 0.5)
+            self.ax3.set_yticks(yticks)
             self.ax3.grid(True)
 
             # Always plot the keyword status line, even if flat at zero
@@ -964,7 +977,7 @@ class VADKWSProcessor:
                     )
             
             # Always show the legend in ax3
-            self.ax3.legend(loc='upper right')
+            self.ax3.legend(loc='upper left')
 
             self.ax3.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
@@ -972,8 +985,9 @@ class VADKWSProcessor:
             status = "Listening..." if keyword_detected else "Waiting for keyword"
             self.status_text.set_text(f'Status: {status}')
             
-            # Adjust layout
-            self.fig.tight_layout()
+            # Adjust layout with consistent padding
+            # Use subplots_adjust instead of tight_layout for better control
+            self.fig.subplots_adjust(left=0.07, right=0.95, top=0.95, bottom=0.07)
 
         except Exception as e:
             print(f"Error updating plot: {e}")
@@ -1401,7 +1415,8 @@ def main():
             wf.close()
             processor.isDebug = True
             processor.kws_processing_thread() # start thread
-            plt.tight_layout()
+            # Use subplots_adjust instead of tight_layout for better control
+            plt.subplots_adjust(left=0.07, right=0.95, top=0.95, bottom=0.07)
             # plt.show(block=False)
             plt.show(block=True)
             print(f"Finished simulating {test_wav_path}")

@@ -39,11 +39,11 @@ class AudioTestFrame(wx.Frame):
         self.processor = VADKWSProcessor(
             sample_rate=16000,
             chunk_size=8000,
-            threshold=0.01,
+            threshold=0.05,
             channels=1,
             silence_duration=0.3,
             buffer_duration=5.0,
-            time_to_end_conversation=5,
+            time_to_end_conversation=3,
             keywords=["hello", "Hi panda", "hi siri", "你好"],
             stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"]
 
@@ -57,6 +57,8 @@ class AudioTestFrame(wx.Frame):
         self.initial_message += "Press F5 or click the Refresh button to update the list of available audio devices.\n"
         self.initial_message += "Select an audio input device from the dropdown menu.\n"
         
+        # Create buttons
+        button_size = wx.Size(35, 30)  # 约等于10个字符宽，高度增加一倍至60像素
         # Top frame for buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
@@ -64,7 +66,7 @@ class AudioTestFrame(wx.Frame):
         device_sizer = wx.BoxSizer(wx.HORIZONTAL)
         device_label = wx.StaticText(self.panel, label="Audio Input Device:")
         self.device_combobox = wx.Choice(self.panel, size=(300, -1))
-        self.refresh_btn = wx.Button(self.panel, label="↻ Refresh", size=(90, -1))
+        self.refresh_btn = wx.Button(self.panel, label="↻ Refresh", size=(90, 30))
         
         # Populate the device combobox
         self.populate_audio_devices()
@@ -77,9 +79,7 @@ class AudioTestFrame(wx.Frame):
         self.device_combobox.Bind(wx.EVT_CHOICE, self.on_device_selected)
         self.refresh_btn.Bind(wx.EVT_BUTTON, self.on_refresh_devices)
         
-        # Create buttons
-        button_size = wx.Size(35, -1)  # 约等于10个字符宽，70像素可根据实际调整
-        
+   
         # 使用特殊样式创建按钮，禁用空格键触发和TAB焦点
         button_style = wx.BORDER_NONE  # 不使用WANTS_CHARS，因为它会捕获空格键
         
