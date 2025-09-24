@@ -93,6 +93,7 @@ class VADKWSProcessor:
         self.audio_frame_callback = None
         self.recording_frames = []
         self.is_recording = False
+        self.recording_done = False  # 标记录音是否已完成但尚未保存
         self.recording_start_time = None
         self.recordings_dir = "recordings"
         if not os.path.exists(self.recordings_dir):
@@ -146,12 +147,13 @@ class VADKWSProcessor:
         
         self.audio_buffer_original = collections.deque(maxlen=25 * sample_rate)  # 原始音频数据
         self.audio_buffer_speechonly = collections.deque(maxlen=25 * sample_rate)  # 只保存语音段
-        self.raw_vad_history = collections.deque(maxlen=500)
+        self.raw_vad_history = collections.deque(maxlen=1000)
         self.vad_history = np.zeros(100)    
         self.detected_keywords = collections.deque(maxlen=20)  # [(text, timestamp), ...]
         self.detected_vad = collections.deque(maxlen=50)  # [(is_speech, timestamp), ...]
         self.keyword_status_history = collections.deque(maxlen=50)  # [(is_detected, timestamp), ...]
         self.speech_level = collections.deque(maxlen=100)  # [(is_detected, timestamp), ...]
+        self.current_kws_results = []  # 当前最新的ASR结果，用于文件命名
         
         # VAD and KWS models
         self.vad_model = None   # 初始化为None
@@ -253,18 +255,7 @@ class VADKWSProcessor:
             return torch.cuda.is_available()
         except ImportError:
             return False
-    
-    def set_audio_callback(self, callback_func):
-        """Set or clear a callback function to receive audio frames
-        
-        Args:
-            callback_func: Function to call with audio frames or None to clear
-        """
-        self.audio_frame_callback = callback_func
-        # Reset recording frames when setting a new callback
-        if callback_func is not None:
-            self.recording_frames = []
-    
+            
     def start_recording(self):
         """Start recording audio
         
@@ -277,10 +268,12 @@ class VADKWSProcessor:
         
         self.is_recording = True
         self.recording_frames = []  # 清空之前的录音
+        self.current_kws_results = []  # 清空上一次的关键词结果，避免新录音使用旧关键词
         self.recording_start_time = time.time()
         
         if self.isDebug:
             print(f"Recording started at {datetime.fromtimestamp(self.recording_start_time).strftime('%H:%M:%S')}")
+            print(f"已清空previous keywords，current_kws_results重置为空列表")
         
         return True
     
@@ -294,30 +287,47 @@ class VADKWSProcessor:
             return None
         
         self.is_recording = False
+        self.recording_done = True  # 设置录音已完成标志
         
         if not self.recording_frames:
-            if self.isDebug:
-                print("No audio data recorded")
+            print("警告: 没有录制到音频数据")
+            # 即使没有录音数据，也不要重置recording_done标志
+            # 这样可以确保在其他地方检查时不会误判
             return None
         
-        if self.isDebug:
-            duration = sum(len(frame) for frame in self.recording_frames) / self.sample_rate
-            print(f"Recording stopped, {len(self.recording_frames)} frames, {duration:.2f} seconds")
+        # 打印更多调试信息
+        duration = sum(len(frame) for frame in self.recording_frames) / self.sample_rate
+        print(f"录音已停止, {len(self.recording_frames)} 帧, {duration:.2f} 秒")
+        print(f"当前KWS结果: {self.current_kws_results}")
         
-        return self.recording_frames
+        # 当前录音结果已保存，下一次录音前应清空
+        return_frames = self.recording_frames.copy()
+        
+        # 在这里不直接调用save_recording，而是通过标志让KWS线程来调用
+        # 这样可以确保录音在ASR处理完成后保存，文件名能包含最新的识别结果
+        print(f"录音停止完成，已设置recording_done标志为{self.recording_done}，等待KWS线程处理后保存")
+        
+        # 停止录音后，不要立即清空 current_kws_results，因为在保存录音时需要使用
+        # self.current_kws_results = []
+        
+        return return_frames
     
     def save_recording(self, filename=None):
         """Save recorded audio to file
         
         Args:
             filename: Optional filename to save to. If None, a filename will be generated
-                    using the last detected keyword and timestamp.
+                    based on the KWS processing state:
+                    - If find_valid_start is True, VAD detection is active, and a keyword is detected,
+                      use the keyword (first 10 chars) as filename prefix.
+                    - If find_valid_start is False, use "quiet" as filename prefix.
         
         Returns:
             str: Path to the saved file or None if saving failed
         """
         if not self.recording_frames:
             print("No audio data to save")
+            self.recording_done = False  # 重置录音完成标志
             return None
         
         try:
@@ -325,20 +335,34 @@ class VADKWSProcessor:
             import numpy as np
             import re
             
-            # 如果没有提供文件名，生成一个带有最后检测到的关键词的文件名
+            # 如果没有提供文件名，根据KWS处理状态生成文件名
             if filename is None:
                 timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
                 
-                # 获取最近的关键词检测结果（如果有）
-                last_keyword = "recording"
-                if hasattr(self, 'detected_keywords') and self.detected_keywords:
-                    last_kw_info = self.detected_keywords[-1]
-                    if isinstance(last_kw_info, tuple) and len(last_kw_info) >= 1:
-                        last_keyword = last_kw_info[0]
-                    # 移除文件名中的非法字符
-                    last_keyword = re.sub(r'[\\/*?:"<>|]', '', last_keyword)
+                # 默认文件名前缀
+                filename_prefix = "recording"
                 
-                filename = os.path.join(self.recordings_dir, f"{last_keyword}_{timestamp}.wav")
+                # 首先检查是否有有效的ASR结果
+                if hasattr(self, 'current_kws_results') and self.current_kws_results:
+                    # 使用当前ASR结果作为文件名
+                    asr_text = ""
+                    for item in self.current_kws_results:
+                        if isinstance(item, dict) and 'text' in item and item['text']:
+                            # 清理文本，去除特殊字符
+                            clean_text = re.sub(r"<\|.*?\|>", "", item['text'])
+                            clean_text = re.sub(r"[^\w\s]", "", clean_text)
+                            if clean_text.strip():
+                                asr_text += clean_text + "_"
+                    
+                    if asr_text:
+                        # 去掉末尾的下划线
+                        asr_text = asr_text.strip('_')
+                        # 限制长度
+                        if len(asr_text) > 50:
+                            asr_text = asr_text[:50]
+                        filename_prefix = re.sub(r'[\\/*?:"<>|]', '', asr_text)
+                
+                filename = os.path.join(self.recordings_dir, f"{filename_prefix}_{timestamp}.wav")
             
             # 将所有音频帧合并到一个数组中
             audio_data = np.concatenate(self.recording_frames)
@@ -357,8 +381,16 @@ class VADKWSProcessor:
             if self.isDebug:
                 print(f"Audio saved to {filename}")
             
-            # 保存最后识别的文本，用于UI显示
-            self.last_recognized_text = last_keyword
+            # 保存用于UI显示的文本，使用文件名前缀
+            self.last_recognized_text = filename_prefix
+            
+            print(f"成功保存录音到文件: {filename}")
+            
+            # 重置录音完成标志
+            self.recording_done = False
+            
+            # 清空录音帧，避免重复保存
+            self.recording_frames = []
             
             return filename
         
@@ -607,7 +639,7 @@ class VADKWSProcessor:
 
         self.animation = FuncAnimation(
             self.fig, self.update_plot,
-            interval=500,
+            interval=50,
             blit=False,
             repeat=True,
             cache_frame_data=False
@@ -650,16 +682,15 @@ class VADKWSProcessor:
                 return []  # Return empty list since we're not using blit=True
 
             # Use timestamps from audio buffer instead of current time
-            if audio_buffer_original:
-                last_chunk, last_timestamp = audio_buffer_original[-1]
-                current_time = last_timestamp + (len(last_chunk) / self.sample_rate)  # Add duration of last chunk
-            else:
-                current_time = time.time()
-            if self.running:
-                current_time = time.time()
-
-            display_window = 20  # Show last 20 seconds
-            start_time = current_time - display_window
+            # 获取当前时间
+            current_time = time.time()
+            
+            # 固定显示窗口为20秒，并使用整数时间来减少跳动
+            display_window = 20  # 固定窗口20秒
+            
+            # 将当前时间取整到秒，避免毫秒级的小幅跳动
+            rounded_current_time = int(current_time) + 1.0  # 向上取整到下一秒，增加稳定性
+            start_time = rounded_current_time - display_window
 
             # 处理原始音频数据 in ax1
             all_original_audio = []
@@ -687,10 +718,13 @@ class VADKWSProcessor:
             all_speech_timestamps = []
             
             # Filter buffer data within display window for speech only
-            filtered_speech = [
-                (chunk, ts) for chunk, ts in audio_buffer_speech 
-                if ts is not None and ts + (len(chunk) / self.sample_rate) >= start_time
-            ]
+            filtered_speech = []
+            for chunk, ts in audio_buffer_speech:
+                if ts is None:
+                    print(f"警告: audio_buffer_speech中发现None时间戳，已跳过")
+                    continue
+                if ts + (len(chunk) / self.sample_rate) >= start_time:
+                    filtered_speech.append((chunk, ts))
             
             for audio_chunk, chunk_start_time in filtered_speech:
                 # Generate timestamps for each sample in the chunk
@@ -707,10 +741,14 @@ class VADKWSProcessor:
             # Process keyword detection status data
             keyword_status_values = []
             keyword_status_timestamps = []
-            filtered_keyword_status = [
-                (is_detected, ts) for is_detected, ts in keyword_status_history_copy
-                if ts >= start_time
-            ]
+            # 安全过滤keyword_status数据
+            filtered_keyword_status = []
+            for is_detected, ts in keyword_status_history_copy:
+                if ts is None:
+                    print(f"警告: 检测到keyword_status数据中有None时间戳，已跳过")
+                    continue
+                if ts >= start_time:
+                    filtered_keyword_status.append((is_detected, ts))
             
             # Always ensure we have at least a baseline for the keyword status line
             if not filtered_keyword_status:
@@ -757,10 +795,14 @@ class VADKWSProcessor:
                 self.ax1.plot(original_timestamps, original_samples, 'gray', linewidth=0.8)
 
                 # Plot speech level in ax1
-                filtered_speech_level = [
-                    (level, ts) for level, ts in self.speech_level
-                    if ts >= start_time
-                ]
+                # 安全过滤speech_level数据
+                filtered_speech_level = []
+                for level, ts in self.speech_level:
+                    if ts is None:
+                        print(f"警告: 检测到speech_level数据中有None时间戳，已跳过")
+                        continue
+                    if ts >= start_time:
+                        filtered_speech_level.append((level, ts))
                 
                 if filtered_speech_level:
                     level_times = []
@@ -784,8 +826,8 @@ class VADKWSProcessor:
                         last_level = level
                         last_time = ts
                     
-                    # Add final point
-                    level_times.append(current_time)
+                    # Add final point using rounded time
+                    level_times.append(rounded_current_time)
                     level_values.append(last_level)
                     
                     # Plot speech level line in ax1
@@ -794,7 +836,8 @@ class VADKWSProcessor:
             
             self.ax1.legend(loc='upper right')
 
-            self.ax1.set_xlim(start_time, current_time)
+            # 设置固定的时间轴范围
+            self.ax1.set_xlim(start_time, rounded_current_time)
             self.ax1.set_ylim(-1.0, 1.0)
             self.ax1.grid(True)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
@@ -810,11 +853,14 @@ class VADKWSProcessor:
                 self.ax2.plot(speech_timestamps, speech_samples, 'gray', 
                              linewidth=0.8, alpha=0.5, label='Audio')
 
-            # Plot VAD detection results
-            filtered_vad = [
-                (vad_level, ts) for vad_level, ts in detected_vad_copy
-                if ts >= start_time
-            ]
+            # Plot VAD detection results - 过滤掉任何None时间戳并添加调试日志
+            filtered_vad = []
+            for vad_level, ts in detected_vad_copy:
+                if ts is None:
+                    print(f"警告: 检测到VAD数据中有None时间戳，已跳过")
+                    continue
+                if ts >= start_time:
+                    filtered_vad.append((vad_level, ts))
             
             if filtered_vad:
                 vad_times = []
@@ -838,8 +884,8 @@ class VADKWSProcessor:
                     last_level = level
                     last_time = ts
                 
-                # Add final point
-                vad_times.append(current_time)
+                # Add final point using rounded time
+                vad_times.append(rounded_current_time)
                 vad_values.append(last_level)
                 
                 # Plot VAD line
@@ -853,7 +899,8 @@ class VADKWSProcessor:
                 #                        color='green', alpha=0.2)
 
             self.ax2.legend(loc='upper right')
-            self.ax2.set_xlim(start_time, current_time)
+            # 设置固定的时间轴范围
+            self.ax2.set_xlim(start_time, rounded_current_time)
             self.ax2.set_ylim(-1.0, 1.0)
             self.ax2.grid(True)
             self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
@@ -861,7 +908,8 @@ class VADKWSProcessor:
             # 更新关键词显示子图 (ax3) - now includes keyword status history
             self.ax3.clear()
             self.ax3.set_title('Detected Keywords & Keyword Status')
-            self.ax3.set_xlim(start_time, current_time)
+            # 设置固定的时间轴范围
+            self.ax3.set_xlim(start_time, rounded_current_time)
             self.ax3.set_ylim(-0.1, 1.1)
             self.ax3.grid(True)
 
@@ -884,11 +932,14 @@ class VADKWSProcessor:
             if start_shade is not None:
                 self.ax3.axvspan(start_shade, current_time, alpha=0.2, color='red')
 
-            # Filter and display keywords within time window
-            visible_keywords = [
-                (kw, ts) for kw, ts in detected_keywords_copy 
-                if start_time <= ts <= current_time
-            ]
+            # Filter and display keywords within time window - 增强安全性检查
+            visible_keywords = []
+            for kw, ts in detected_keywords_copy:
+                if ts is None:
+                    print(f"警告: 检测到detected_keywords中有None时间戳，已跳过")
+                    continue
+                if start_time <= ts <= current_time:
+                    visible_keywords.append((kw, ts))
 
             # 将所有关键词显示在同一行
             if visible_keywords:
@@ -938,7 +989,6 @@ class VADKWSProcessor:
         process_count = 0
         last_boundary = 0
         last_chunk_hash = None
-        
         # Constants for voice detection
         AMPLITUDE_THRESHOLD = self.threshold
         SLIP_WINDOW_TIME = 0.1 # seconds
@@ -1057,10 +1107,12 @@ class VADKWSProcessor:
                     if speech_start_time is not None:
                         end_time = speech_start_time + (window_end - start_pos) / self.sample_rate
                     else:
-                        # 如果 speech_start_time 为 None，使用当前时间或其他适当的默认值
-                        end_time = time.time() - (window_end - start_pos) / self.sample_rate
-                        if self.isDebug:
-                            print(f"Warning: speech_start_time was None, using estimated time")
+                        # 如果 speech_start_time 为 None，使用当前时间作为合理的估计值
+                        current_time = time.time()
+                        end_time = current_time - (window_end - start_pos) / self.sample_rate
+                        # 顺便更新speech_start_time以避免后续处理出现None
+                        speech_start_time = current_time - (buffer_len / self.sample_rate)
+                        print(f"修正: speech_start_time为None，已更新为估计值{speech_start_time}")
                     
                     window = audio_buffer_kws[i:window_end]
                     if window.size == 0:
@@ -1105,6 +1157,12 @@ class VADKWSProcessor:
                     continue
 
                 with self.lock:
+                    # 确保speech_start_time不为None
+                    if speech_start_time is None:
+                        current_time = time.time()
+                        speech_start_time = current_time - (len(chunk_data) / self.sample_rate)
+                        print(f"警告: 添加到audio_buffer_speechonly前修正speech_start_time为: {speech_start_time}")
+                    
                     self.audio_buffer_speechonly.append((chunk_data, speech_start_time))
                     if self.isDebug:
                         print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate:.1f} seconds of speech to buffer")
@@ -1129,28 +1187,53 @@ class VADKWSProcessor:
                     
                         with self.lock:
                             if not vad_value:
-                                # value为空列表时，标记为0
-                                self.detected_vad.append((0, speech_start_time))
+                                # value为空列表时，标记为0 - 但确保时间戳不为None
+                                if speech_start_time is not None:
+                                    self.detected_vad.append((0, speech_start_time))
+                                else:
+                                    print("警告: speech_start_time为None，跳过添加VAD检测记录")
                             else:
                                 # 对于每个检测到的语音区间
                                 for segment in vad_value:
                                     start_sample, end_sample = segment
-                                    # 将采样点索引转换为时间戳
-                                    start_time = speech_start_time + start_sample / self.sample_rate
-                                    end_time = speech_start_time + end_sample / self.sample_rate
-                                    
-                                    # 记录语音区间的起始和结束，使用0.5表示检测到语音
-                                    self.detected_vad.append((0.5, start_time))
-                                    self.detected_vad.append((0, end_time))
+                                    # 将采样点索引转换为时间戳，但先检查speech_start_time是否为None
+                                    if speech_start_time is not None:
+                                        start_time = speech_start_time + start_sample / self.sample_rate
+                                        end_time = speech_start_time + end_sample / self.sample_rate
+                                        
+                                        # 记录语音区间的起始和结束，使用0.5表示检测到语音
+                                        self.detected_vad.append((0.5, start_time))
+                                        self.detected_vad.append((0, end_time))
+                                    else:
+                                        print("警告: speech_start_time为None，无法计算VAD时间戳")
                 else:
                     if self.isDebug:
                         print("VAD model not available, skipping VAD detection")
 
-                # Process through ASR model
+                # Process through ASR model - 仅当VAD检测的语音段足够长时才调用ASR
                 if self.isDebug:
                     print(f"DEBUG: Processing speech ASR...")
-                if self.asr_model is not None:
+                
+                # 检查是否有有效的VAD结果并且语音段长度足够
+                valid_speech_segment = False
+                if self.vad_model is not None and 'vad_result' in locals() and isinstance(vad_result, list) and len(vad_result) > 0:
+                    vad_item = vad_result[0]
+                    vad_value = vad_item.get('value', [])
+                    
+                    # 检查是否有任何语音段长度超过500个样本点
+                    for segment in vad_value:
+                        start_sample, end_sample = segment
+                        segment_length = end_sample - start_sample
+                        if segment_length > 500:  # 只有当语音段长度超过500时才认为有效
+                            valid_speech_segment = True
+                            if self.isDebug:
+                                print(f"Found valid speech segment with length {segment_length} samples")
+                            break
+                
+                if self.asr_model is not None and (valid_speech_segment or self.vad_model is None):
                     try:
+                        if self.isDebug:
+                            print(f"Running ASR on chunk of {len(chunk_data)} samples")
                         asr_result = self.asr_model.generate(
                             input=chunk_data,
                             output_type="dict",
@@ -1181,6 +1264,10 @@ class VADKWSProcessor:
                                 text = re.sub(r"[^\w\s]", "", text)  # 去除所有标点符号
                                 if self.isDebug:
                                     print(f"ASR result: {text}")
+                                    if valid_speech_segment:
+                                        print("Result from valid speech segment (length > 500 samples)")
+                                    else:
+                                        print("Result from VAD-less processing")
                                 
                                 # Save to detected keywords with timestamp
                                 with self.lock:
@@ -1188,6 +1275,11 @@ class VADKWSProcessor:
                                     if self.isDebug:
                                         print(f"Appending {text} at {speech_start_time} to buffer")
                                     self.detected_keywords.append((text, speech_start_time)) #datetime.now())) timestamp is end time of detected keyword
+                                    
+                                    # 保存当前ASR结果，用于文件命名
+                                    self.current_kws_results = [{'text': text}]
+                                    if self.isDebug:
+                                        print(f"Current KWS results updated: {self.current_kws_results}")
 
                                 # Check if text contains any of our keywords
                                 if not self.is_keyword_detected:
@@ -1242,6 +1334,22 @@ class VADKWSProcessor:
                 traceback.print_exc()
                 if self.isDebug:
                     break
+            
+            # 重要：检查是否需要保存录音文件（将此逻辑移出异常处理块）
+            try:
+                # print(f"DEBUG: 检查是否需要保存录音 - recording_done={self.recording_done}, frames={len(self.recording_frames) if self.recording_frames else 0}")
+                with self.lock:
+                    if self.recording_done and self.recording_frames:
+                        # 如果录音已完成但尚未保存，且ASR处理可能已完成，保存录音
+                        print(f"录音已完成，准备保存文件. recording_frames长度: {len(self.recording_frames)}")
+                        saved_filename = self.save_recording()
+                        if saved_filename:
+                            print(f"KWS线程中成功保存录音到: {saved_filename}")
+                        else:
+                            print("KWS线程中保存录音失败")
+            except Exception as e:
+                print(f"Error saving recording in KWS thread: {e}")
+                traceback.print_exc()
 
         if self.isDebug:
             print("KWS processing thread stopped")

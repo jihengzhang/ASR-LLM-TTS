@@ -1,5 +1,7 @@
 # FunASR VAD 语音激活录音系统
 
+Top level file：Audio_test_UI.py
+
 这是一个基于 FunASR 的语音激活检测(VAD)系统，可以自动检测语音并录音保存。系统支持两种工作模式：使用 FunASR 的高级 VAD 检测，以及基于简单振幅阈值的备用模式。
 
 ## 功能特点

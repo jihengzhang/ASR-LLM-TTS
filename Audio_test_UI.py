@@ -471,12 +471,6 @@ class AudioTestFrame(wx.Frame):
         
         # 阻止空格键的默认行为（激活按钮）
         if key_code == wx.WXK_SPACE:
-            # 打印调试信息到结果区域
-            timestamp = datetime.now().strftime('%H:%M:%S')
-            current_text = self.result_text.GetValue()
-            self.result_text.SetValue(f"{current_text}\n{timestamp}: Space key pressed")
-            self.result_text.ShowPosition(self.result_text.GetLastPosition())
-            
             # 立即阻止事件继续传播，防止按钮激活
             if not self.space_pressed:
                 # 只有当处理器已启动时才开始录音
@@ -491,9 +485,10 @@ class AudioTestFrame(wx.Frame):
                         self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
                         self.recording_indicator.SetLabel("⚫ Recording")
                         
-                        # 更新UI以反映录音状态
+                        # 更新UI以反映录音状态 - 使用简单的信息
                         timestamp = datetime.now().strftime('%H:%M:%S')
-                        self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording started...")
+                        current_text = self.result_text.GetValue()
+                        self.result_text.SetValue(f"{current_text}\n{timestamp}: 正在录音 (now it's recording...)")
                         self.result_text.ShowPosition(self.result_text.GetLastPosition())
                     else:
                         # 录音启动失败，记录错误信息
@@ -533,30 +528,39 @@ class AudioTestFrame(wx.Frame):
         if event.GetKeyCode() == wx.WXK_SPACE and self.space_pressed:
             self.space_pressed = False
             
-            # 停止处理器中的录音并保存
+            # 停止处理器中的录音
             self.processor.stop_recording()
-            filename = self.processor.save_recording()
             
             # 恢复录音指示器颜色为灰色
             self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))
             self.recording_indicator.SetLabel("⚫")
             
-            # 更新UI以反映录音已停止和保存
+            # 简单显示录音已停止
             timestamp = datetime.now().strftime('%H:%M:%S')
             current_text = self.result_text.GetValue()
-            
-            # 检查是否成功保存了文件
-            if filename:
-                # 获取最后识别的文本作为文件名的一部分
-                recognized_text = self.processor.last_recognized_text or "recording"
-                self.result_text.SetValue(f"{current_text}\n{timestamp}: Recording saved as '{os.path.basename(filename)}'")
-            else:
-                self.result_text.SetValue(f"{current_text}\n{timestamp}: No audio recorded")
-                
+            self.result_text.SetValue(f"{current_text}\n{timestamp}: 录音已停止")
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
+            
             return  # 阻止事件继续传播
             
         event.Skip()
+        
+    def on_recording_saved(self, filename):
+        """录音保存完成后的回调函数
+        
+        Args:
+            filename: 保存的文件路径
+        """
+        # 使用wx.CallAfter确保在主线程中更新UI
+        def update_ui():
+            timestamp = datetime.now().strftime('%H:%M:%S')
+            current_text = self.result_text.GetValue()
+            if filename:
+                self.result_text.SetValue(f"{current_text}\n{timestamp}: 录音已保存为 '{os.path.basename(filename)}'")
+            else:
+                self.result_text.SetValue(f"{current_text}\n{timestamp}: 没有录音数据可保存")
+            self.result_text.ShowPosition(self.result_text.GetLastPosition())
+        wx.CallAfter(update_ui)
     
     # 注意：录音功能现在由 VADKWSProcessor 类实现
     # 旧的录音方法已移除，现在使用 processor.start_recording() 和 processor.save_recording()
