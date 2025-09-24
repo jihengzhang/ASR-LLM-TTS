@@ -62,7 +62,10 @@ class AudioTestFrame(wx.Frame):
         # Top frame for buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
-        # Create combobox for audio device selection
+        # Create combined row for device selection and recording prompt
+        top_row_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        
+        # Left side: device selection
         device_sizer = wx.BoxSizer(wx.HORIZONTAL)
         device_label = wx.StaticText(self.panel, label="Audio Input Device:")
         self.device_combobox = wx.Choice(self.panel, size=(300, -1))
@@ -74,6 +77,29 @@ class AudioTestFrame(wx.Frame):
         device_sizer.Add(device_label, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
         device_sizer.Add(self.device_combobox, 1, wx.EXPAND|wx.RIGHT, 5)
         device_sizer.Add(self.refresh_btn, 0)
+        
+        # Right side: recording prompt
+        prompt_sizer = wx.BoxSizer(wx.HORIZONTAL)
+        self.prompt_text = wx.StaticText(self.panel, label="按住空格键开始进行录音 (Hold SPACE to record)")
+        font = self.prompt_text.GetFont()
+        font.SetPointSize(12)
+        font.SetWeight(wx.FONTWEIGHT_BOLD)
+        self.prompt_text.SetFont(font)
+        self.prompt_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
+        
+        # Add recording status indicator
+        self.recording_indicator = wx.StaticText(self.panel, label="⚫")
+        self.recording_indicator.SetFont(font)
+        self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
+        
+        prompt_sizer.Add(self.prompt_text, 0, wx.ALIGN_CENTER_VERTICAL)
+        prompt_sizer.Add((20, -1), 0, wx.ALIGN_CENTER_VERTICAL)  # Spacer
+        prompt_sizer.Add(self.recording_indicator, 0, wx.ALIGN_CENTER_VERTICAL)
+        
+        # Add device selection and recording prompt to the combined row
+        top_row_sizer.Add(device_sizer, 1, wx.ALIGN_CENTER_VERTICAL)
+        top_row_sizer.AddStretchSpacer(1)  # Flexible space in between
+        top_row_sizer.Add(prompt_sizer, 0, wx.ALIGN_CENTER_VERTICAL)
         
         # Bind device selection event and refresh button
         self.device_combobox.Bind(wx.EVT_CHOICE, self.on_device_selected)
@@ -105,31 +131,12 @@ class AudioTestFrame(wx.Frame):
         self.quit_btn.Bind(wx.EVT_BUTTON, self.on_quit)
         
         # Add buttons to sizer with equal width
-        btn_sizer.Add(self.start_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
-        btn_sizer.Add(self.stop_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
-        btn_sizer.Add(self.quit_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=10)
+        btn_sizer.Add(self.start_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
+        btn_sizer.Add(self.stop_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
+        btn_sizer.Add(self.quit_btn, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
         
-        # Add recording prompt text
-        prompt_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.prompt_text = wx.StaticText(self.panel, label="按住空格键开始进行录音 (Hold SPACE to record)")
-        font = self.prompt_text.GetFont()
-        font.SetPointSize(12)
-        font.SetWeight(wx.FONTWEIGHT_BOLD)
-        self.prompt_text.SetFont(font)
-        self.prompt_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
-        
-        # Add recording status indicator
-        self.recording_indicator = wx.StaticText(self.panel, label="⚫")
-        self.recording_indicator.SetFont(font)
-        self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))  # Gray when not recording
-        
-        prompt_sizer.Add(self.prompt_text, 0, wx.ALIGN_CENTER_VERTICAL)
-        prompt_sizer.Add((20, -1), 0, wx.ALIGN_CENTER_VERTICAL)  # Spacer
-        prompt_sizer.Add(self.recording_indicator, 0, wx.ALIGN_CENTER_VERTICAL)
-        
-        # Add prompt to main sizer
-        main_sizer.Add(device_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=10)
-        main_sizer.Add(prompt_sizer, proportion=0, flag=wx.EXPAND|wx.LEFT|wx.RIGHT|wx.BOTTOM, border=10)
+        # Add the combined row and buttons to main sizer
+        main_sizer.Add(top_row_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
         main_sizer.Add(btn_sizer, proportion=0, flag=wx.EXPAND)
         
         # Frame for matplotlib plot
@@ -146,7 +153,7 @@ class AudioTestFrame(wx.Frame):
             # 确保canvas获取合适的大小
             self.canvas.SetMinSize(self.plot_panel.GetMinSize())
         
-        main_sizer.Add(self.plot_panel, proportion=8, flag=wx.EXPAND|wx.ALL, border=10)
+        main_sizer.Add(self.plot_panel, proportion=8, flag=wx.EXPAND|wx.ALL, border=5)
         
         # Text box for KWS/ASR results with label at the top
         result_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -166,7 +173,8 @@ class AudioTestFrame(wx.Frame):
         result_sizer.Add(result_label, proportion=0, flag=wx.EXPAND|wx.BOTTOM, border=5)
         result_sizer.Add(self.result_text, proportion=1, flag=wx.EXPAND)
         
-        main_sizer.Add(result_sizer, proportion=2, flag=wx.EXPAND|wx.ALL, border=10)
+        # Reduced text box height by 1/3 (from proportion=2 to proportion=1)
+        main_sizer.Add(result_sizer, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
         
         # Add status bar at the bottom of the UI
         status_sizer = wx.BoxSizer(wx.HORIZONTAL)
@@ -175,10 +183,10 @@ class AudioTestFrame(wx.Frame):
         self.status_text.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         self.status_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
         
-        status_sizer.Add(self.status_text, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
+        status_sizer.Add(self.status_text, proportion=1, flag=wx.EXPAND|wx.LEFT, border=5)
         
         # Add status bar to main sizer
-        main_sizer.Add(status_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
+        main_sizer.Add(status_sizer, proportion=0, flag=wx.EXPAND|wx.BOTTOM|wx.LEFT|wx.RIGHT, border=5)
         
         self.panel.SetSizer(main_sizer)
         
@@ -501,6 +509,8 @@ class AudioTestFrame(wx.Frame):
                     if self.processor.start_recording():
                         # 更改录音指示器颜色为红色
                         self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
+                        # 更新状态文本为 "Recording"
+                        self.status_text.SetLabel("Status: Recording")
                         self.recording_indicator.SetLabel("⚫ Recording")
                         
                         # 更新UI以反映录音状态 - 使用简单的信息
@@ -552,6 +562,9 @@ class AudioTestFrame(wx.Frame):
             # 恢复录音指示器颜色为灰色
             self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))
             self.recording_indicator.SetLabel("⚫")
+            
+            # 恢复状态文本为等待关键词
+            self.status_text.SetLabel("Status: Waiting for keyword")
             
             # 简单显示录音已停止
             timestamp = datetime.now().strftime('%H:%M:%S')
