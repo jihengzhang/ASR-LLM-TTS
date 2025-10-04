@@ -39,7 +39,7 @@ class AudioTestFrame(wx.Frame):
         self.processor = VADKWSProcessor(
             sample_rate=16000,
             chunk_size=8000,
-            threshold=0.05,
+            threshold=0.02,
             channels=1,
             silence_duration=0.3,
             buffer_duration=5.0,
