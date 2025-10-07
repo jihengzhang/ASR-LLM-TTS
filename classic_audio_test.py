@@ -11,7 +11,7 @@ from collections import namedtuple
 AudioEndpoint = namedtuple('AudioEndpoint', ['idx', 'name', 'mode'])
 
 class AudioDeviceManager:
-    def __init__(self, device_name: str = "ESP-ADF-AUDIO"):
+    def __init__(self, device_name: str = "ESP-ADF-AUD"):
         # 常量定义
         self.HFP_KEYWORDS = ['hands-free', 'headset', 'communication', 'bthhfenum.sys']
         self.A2DP_KEYWORDS = ['stereo', 'btha2dp.sys']
@@ -40,9 +40,15 @@ class AudioDeviceManager:
         # Initialize device endpoints
         self._find_device_endpoints()
     
-    def _is_target_device(self, name: str) -> bool:
-        """检查设备名称是否匹配目标设备"""
-        return self.device_name.lower() in name.lower()
+    # def _is_target_device(self, name: str) -> bool:
+    #     """检查设备名称是否匹配目标设备"""
+    #     return self.device_name.lower() in name.lower()
+    
+    def _is_target_device(self, dev: dict) -> bool:
+        """检查设备是否匹配目标设备（名称匹配且不是ASIO）"""
+        name_match = self.device_name.lower() in dev['name'].lower()
+        not_asio = dev['hostapi'] != 3  # ASIO = 3
+        return name_match and not_asio
     
     def _is_hfp_device(self, name: str) -> bool:
         """检查是否为HFP设备"""
@@ -89,12 +95,16 @@ class AudioDeviceManager:
             'fallback': {'input': None, 'output': None}
         }
         
+        # 初始化变量，避免UnboundLocalError
+        input_endpoint = None
+        output_endpoint = None
+        
         # 按API类型分组目标设备
         target_devices_by_api = {}
         
         for idx, dev in enumerate(self.devices):
             name = dev['name']
-            if not self._is_target_device(name):
+            if not self._is_target_device(dev):
                 continue
                 
             api_id = dev['hostapi']
@@ -240,16 +250,27 @@ class AudioDeviceManager:
             print(f"🔊 Stream type: Output-only (sd.OutputStream)")
         
         # 创建流参数
+        # kwargs = {
+        #     # 'device': device,
+        #     'device': (3, 8),
+        #     # 'samplerate': sample_rate, #use default
+        #     'samplerate': 44100, #use default
+        #     'channels': self.channels,
+        #     'dtype': np.int16,
+        #     'blocksize': self.chunk_size
+        # }
+
         kwargs = {
             # 'device': device,
-            'device': (3, 8),
+            'device': (2, 4), #（IN OUT) ESP-ADF-AUDIO
+            # 'device': (3, 8), #（IN OUT)
+            # 'device': (2, 7), # Jabra 810
             # 'samplerate': sample_rate, #use default
             'samplerate': 44100, #use default
             'channels': self.channels,
             'dtype': np.int16,
             'blocksize': self.chunk_size
-        }
-        
+        }        
         print(f"⚙️ Stream parameters: {kwargs}")
         
         try:
@@ -277,23 +298,55 @@ class AudioDeviceManager:
         print("Index  Audio API   Type    Rate     Name")
         print("-" * 70)
         
-        # 按设备名称分组显示
-        device_groups = {}
+        # Step 1: 分组目标设备（包含device_name的设备）
+        target_device_groups = {}
+        # Step 2: 分组其他设备
+        other_device_groups = {}
+        
         for idx, dev in enumerate(self.devices):
+            # 忽略ASIO设备
+            if dev['hostapi'] == 3:  # ASIO = 3
+                continue
             name = dev['name']
-            if name not in device_groups:
-                device_groups[name] = []
-            device_groups[name].append((idx, dev))
+            
+            # 检查是否包含目标设备名称
+            if self.device_name.lower() in name.lower():
+                if name not in target_device_groups:
+                    target_device_groups[name] = []
+                target_device_groups[name].append((idx, dev))
+            else:
+                if name not in other_device_groups:
+                    other_device_groups[name] = []
+                other_device_groups[name].append((idx, dev))
         
-        # 显示设备信息
-        for name, group in sorted(device_groups.items()):
-            is_target = self._is_target_device(name)
-            for idx, dev in group:
-                print(self._format_device_info(idx, dev, is_target))
-            if len(group) > 1:  # 如果同一设备有多个接口，添加分隔行
-                print("  " + "-" * 68)
+        # 显示目标设备组
+        if target_device_groups:
+            print(f"=== Target Devices (containing '{self.device_name}') ===")
+            for name, group in sorted(target_device_groups.items()):
+                # 使用第一个设备来检查是否为目标设备（同名设备应该有相同的目标状态）
+                is_target = self._is_target_device(group[0][1])
+                # 先按Type排序(IN在前)，再按API类型排序
+                sorted_group = sorted(group, key=lambda x: (x[1]['max_input_channels'] == 0, x[1]['hostapi']))
+                for idx, dev in sorted_group:
+                    print(self._format_device_info(idx, dev, is_target))
+                if len(group) > 1:  # 如果同一设备有多个接口，添加分隔行
+                    print("  " + "-" * 68)
+            print("-" * 70)
         
-        print("-" * 70)
+        # 显示其他设备组
+        if other_device_groups:
+            print("=== Other Devices ===")
+            for name, group in sorted(other_device_groups.items()):
+                # 其他设备不是目标设备
+                is_target = False
+                # 先按Type排序(IN在前)，再按API类型排序
+                sorted_group = sorted(group, key=lambda x: (x[1]['max_input_channels'] == 0, x[1]['hostapi']))
+                for idx, dev in sorted_group:
+                    print(self._format_device_info(idx, dev, is_target))
+                if len(group) > 1:  # 如果同一设备有多个接口，添加分隔行
+                    print("  " + "-" * 68)
+            print("-" * 70)
+        
         print("* marks target device endpoints")
 
     def refresh_devices(self):
@@ -348,6 +401,8 @@ class AudioDeviceManager:
                     if is_hfp and (time.time() - last_keepalive) >= self.hfp_keepalive_interval:
                         self._send_keepalive(stream)
                         last_keepalive = time.time()
+                    remaining_time = end_time - time.time()
+                    print(f"\rRecording data from Mic ... (remaining: {remaining_time:.1f}s)", end='', flush=True)
                         
         except Exception as e:
             logging.warning(f"Full-duplex mode failed({e}), switching to input-only mode...")
@@ -360,7 +415,7 @@ class AudioDeviceManager:
 
         audio_data = np.concatenate(frames, axis=0)
         if filename:
-            sf.write(filename, audio_data, stream.samplerate)
+            sf.write(filename, audio_data, int(stream.samplerate))
         return audio_data
 
     def play(self, audio_data: np.ndarray, sample_rate: int = None):
@@ -370,6 +425,18 @@ class AudioDeviceManager:
             
         if audio_data.ndim > 1:
             audio_data = audio_data[:, 0]  # Convert to mono
+        
+        # Convert data type to match stream expectations
+        if audio_data.dtype != np.int16:
+            # Normalize float data to [-1, 1] range if needed
+            if audio_data.dtype in [np.float32, np.float64]:
+                # Clip to [-1, 1] range to prevent overflow
+                audio_data = np.clip(audio_data, -1.0, 1.0)
+                # Convert to int16
+                audio_data = (audio_data * 32767).astype(np.int16)
+            else:
+                # For other integer types, convert directly
+                audio_data = audio_data.astype(np.int16)
             
         with self.create_stream(input_enabled=False, 
                               output_enabled=True,
@@ -393,20 +460,67 @@ class AudioDeviceManager:
         return 'HFP' == self._get_device_mode(self.devices[device_idx])
 
 def main():
+    parser = argparse.ArgumentParser(description='Audio Device Manager for ESP-ADF-AUDIO devices')
+    parser.add_argument('-l', '--list', action='store_true', 
+                       help='List all available audio devices')
+    parser.add_argument('-r', '--record', type=int, metavar='SECONDS',
+                       help='Record audio for specified number of seconds')
+    parser.add_argument('-p', '--play', type=str, metavar='PATH',
+                       help='Play audio file from specified path')
+    parser.add_argument('-d', '--device', type=str, default='ESP-ADF-AUD',
+                       help='Target device name to search for (default: ESP-ADF-AUD)')
+    
+    args = parser.parse_args()
+    
     try:
         # 创建音频管理器实例
-        audio_manager = AudioDeviceManager()
-        audio_manager.list_devices()
+        audio_manager = AudioDeviceManager(device_name=args.device)
         
-        # 录制音频
-        print("开始录音（5秒）...")
-        audio_data = audio_manager.record(duration=5, filename="test.wav")
-        print("录音完成，已保存到 test.wav")
-        
-        # 播放刚录制的音频
-        print("\n播放录音...")
-        audio_manager.play(audio_data)
-        print("播放完成")
+        # 处理命令行参数
+        if args.list:
+            audio_manager.list_devices()
+            return 0
+            
+        if args.record:
+            duration = args.record
+            timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
+            filename = f"recording_{timestamp}.wav"
+            print(f"开始录音({duration}秒)...")
+            audio_data = audio_manager.record(duration=duration, filename=filename)
+            print(f"录音完成，已保存到 {filename}")
+            return 0
+            
+        if args.play:
+            try:
+                print(f"播放音频文件: {args.play}")
+                audio_data, sample_rate = sf.read(args.play)
+                audio_manager.play(audio_data, sample_rate)
+                print("播放完成")
+                return 0
+            except Exception as e:
+                print(f"播放文件失败: {e}")
+                return 1
+            
+        # 如果没有指定任何参数，显示默认行为
+        if not any([args.list, args.record, args.play]):
+            print("ESP-ADF-AUDIO 设备管理器")
+            print("使用 -h 查看帮助信息")
+            print("\n默认操作: 列出设备并录制10秒音频")
+            
+            audio_manager.list_devices()
+            
+            # 录制音频
+            duration = 10
+            timestamp = time.strftime("%Y-%m-%d-%H-%M-%S")
+            filename = f"test_{timestamp}.wav"
+            print(f"\n开始录音({duration}秒)...")
+            audio_data = audio_manager.record(duration=duration, filename=filename)
+            print(f"录音完成，已保存到 {filename}")
+            
+            # 播放刚录制的音频
+            print("\n播放录音...")
+            audio_manager.play(audio_data)
+            print("播放完成")
             
     except KeyboardInterrupt:
         print("\n程序被用户中断")
