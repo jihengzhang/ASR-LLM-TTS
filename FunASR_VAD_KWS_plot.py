@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 FunASR_VAD_KWS_plot.py - Real-time Voice Activity Detection and Keyword Spotting with Visualization
+
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
 """
 
 # 在所有其他导入之前设置PY_SSIZE_T_CLEAN宏

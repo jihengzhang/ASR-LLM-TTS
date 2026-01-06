@@ -1,4 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 简化版 FunASR-style VAD 实现
 使用 numpy 和基本音频处理实现语音活动检测
 """

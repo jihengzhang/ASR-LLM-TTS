@@ -1,4 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 FunASR VAD 测试脚本
 用于测试 FunASR 的 VAD 模型是否能够正常工作
 """

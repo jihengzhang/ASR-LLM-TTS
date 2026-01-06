@@ -1,4 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 FunASR 环境检查工具
 检查 FunASR 运行所需的所有依赖是否已正确安装
 """

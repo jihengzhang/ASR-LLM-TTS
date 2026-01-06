@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-
+"""
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+"""
 """
 FunASR VAD 语音活动检测录音系统
 实现真正的语音活动检测功能

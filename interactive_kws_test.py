@@ -1,4 +1,10 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 FunASR Keyword Spotting (KWS) Interactive Test Script
 This script demonstrates how to use the FunASR KWS model for keyword recognition
 with detailed step-by-step diagnostics.

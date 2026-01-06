@@ -1,3 +1,7 @@
+REM Copyright (c) 2026 GE Healthcare
+REM Author: jiheng.zhang@gehealthcare.com
+REM SSO: 212597558
+
 @echo off
 chcp 65001 >nul
 title FanASR VAD 语音激活录音系统

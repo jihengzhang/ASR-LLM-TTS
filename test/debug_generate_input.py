@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 专门针对 generate() 缺少 input 参数错误的测试
 """
 

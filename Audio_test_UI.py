@@ -2,6 +2,10 @@
 # -*- coding: utf-8 -*-
 """
 Audio_test_UI.py - Simple UI to control FunASR VAD/KWS pipeline with wxPython
+
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
 """
 import sys
 import os

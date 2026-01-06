@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+
 简化的 FunASR VAD 测试脚本
 用于测试正确的 API 调用方式
 """

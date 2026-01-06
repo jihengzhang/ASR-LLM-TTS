@@ -1,3 +1,9 @@
+<!--
+Copyright (c) 2026 GE Healthcare
+Author: jiheng.zhang@gehealthcare.com
+SSO: 212597558
+-->
+
 # VAD_KWS_plot.py 设计文档
 
 ## 需求概述
