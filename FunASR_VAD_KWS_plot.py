@@ -1178,7 +1178,16 @@ class VADKWSProcessor:
         END_CONV_THRESHOLD = self.time_to_end_conversation
         chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
         
-        audio_buffer_kws = np.array([], dtype=np.int16)
+        # Pre-buffer: Keep 300ms before speech start to avoid losing initial sounds
+        PRE_BUFFER_TIME = 0.3  # seconds
+        PRE_BUFFER_SIZE = int(PRE_BUFFER_TIME * self.sample_rate)
+        
+        # Post-buffer: Keep 150ms after speech end to avoid cutting off final sounds (reduced for faster response)
+        POST_BUFFER_TIME = 0.15  # seconds
+        POST_BUFFER_SIZE = int(POST_BUFFER_TIME * self.sample_rate)
+        
+        # Fix: audio_buffer_kws should be float32 to match denoised audio data
+        audio_buffer_kws = np.array([], dtype=np.float32)
         silence_timer = 0
         start_pos = 0
         speech_start_time = None  # 记录真实的语音开始时间
@@ -1280,15 +1289,23 @@ class VADKWSProcessor:
                             continue  # continue to next WINDOW Voice CHECK
                         else:
                             self.find_valid_start = True
-                            # 关键修复：计算真实的语音开始时间
+                            # 关键修复：计算真实的语音开始时间并预留前缓冲
+                            # 往前退 PRE_BUFFER_SIZE 个样本来保留语音起始部分
+                            actual_start_pos = max(0, start_pos - PRE_BUFFER_SIZE)
+                            
                             speech_start_time = timestamp #Time stamp is end of speech
                             with self.lock:
                                 self.speech_level.append((0.5,timestamp))
                             silence_timer = 0
+                            
+                            print(f"🎤 Speech start detected: amplitude={start_mean:.4f} > threshold={AMPLITUDE_THRESHOLD}, pre-buffer={PRE_BUFFER_TIME}s")
  
                             # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
                             if self.isDebug:
-                                print(f"DEBUG: Found speech start at start_pos={start_pos}, calculated start_time={speech_start_time}")
+                                print(f"DEBUG: Found speech start at start_pos={start_pos}, with pre-buffer actual_start={actual_start_pos}")
+                            
+                            # Update start_pos to include pre-buffer
+                            start_pos = actual_start_pos
                             break
                     
                     #Trim buffer if no valid speech data
@@ -1333,10 +1350,13 @@ class VADKWSProcessor:
                         # Found silence - this is our endpoint
                         silence_timer += SLIP_WINDOW_TIME                            
                         if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
-                            boundary = window_end
+                            # Add post-buffer to avoid cutting off final sounds
+                            boundary = min(window_end + POST_BUFFER_SIZE, buffer_len)
                             silence_timer = 0  # Reset silence timer
                             with self.lock:
                                 self.speech_level.append((0,end_time))
+                            
+                            print(f"🔴 Speech end detected: silence={PAUSE_VOICE_THRESHOLD}s, post-buffer={POST_BUFFER_TIME}s")
                             break
                         else:
                             continue
@@ -1362,8 +1382,7 @@ class VADKWSProcessor:
                 if len(chunk_data) < MIN_CHUNK:
                     boundary = None
                     self.find_valid_start = False
-                    if self.isDebug:
-                        print("Remaining data too short, waiting for more audio")
+                    print(f"⚠️  Speech segment too short: {len(chunk_data)} samples < {MIN_CHUNK} required, waiting for more audio")
                     continue
 
                 with self.lock:
@@ -1436,14 +1455,22 @@ class VADKWSProcessor:
                     for segment in vad_value:
                         start_sample, end_sample = segment
                         segment_length = end_sample - start_sample
-                        if segment_length > 500:  # 只有当语音段长度超过500时才认为有效
+                        if segment_length > 150:  # 只有当语音段长度超过150时才认为有效
                             valid_speech_segment = True
                             if self.isDebug:
                                 print(f"Found valid speech segment with length {segment_length} samples")
                             break
+                    
+                    # Debug: Print FunASR VAD results
+                    if not valid_speech_segment and vad_value:
+                        max_segment_length = max([end - start for start, end in vad_value]) if vad_value else 0
+                        print(f"⚠️  FunASR VAD: Speech segments too short (max: {max_segment_length} samples < 150), ASR skipped")
+                    elif not vad_value:
+                        print(f"⚠️  FunASR VAD: No speech detected in {len(chunk_data)} samples, ASR skipped")
                 
                 if self.asr_model is not None and (valid_speech_segment or self.vad_model is None):
                     try:
+                        print(f"🔍 Running ASR on {len(chunk_data)} samples ({len(chunk_data)/self.sample_rate:.2f}s)")
                         if self.isDebug:
                             print(f"Running ASR on chunk of {len(chunk_data)} samples")
                         asr_result = self.asr_model.generate(
@@ -1477,7 +1504,7 @@ class VADKWSProcessor:
                                 if self.isDebug:
                                     print(f"ASR result: {text}")
                                     if valid_speech_segment:
-                                        print("Result from valid speech segment (length > 500 samples)")
+                                        print("Result from valid speech segment (length > 150 samples)")
                                     else:
                                         print("Result from VAD-less processing")
                                 
