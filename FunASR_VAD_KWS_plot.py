@@ -223,21 +223,33 @@ class VADKWSProcessor:
         if enable_vosk_kws and VOSK_AVAILABLE:
             try:
                 if vosk_model_path is None:
-                    vosk_model_path = os.path.join(os.path.dirname(__file__), 
-                                                   'models', 'vosk_models', 
-                                                   'vosk-model-small-cn-0.22')
-                if os.path.exists(vosk_model_path):
+                    vosk_models_dir = os.path.join(os.path.dirname(__file__), 'models', 'vosk_models')
+                    preferred_paths = [
+                        os.path.join(vosk_models_dir, 'vosk-model-cn-0.22'),
+                        os.path.join(vosk_models_dir, 'vosk-model-small-cn-0.22')
+                    ]
+                    vosk_model_path = None
+                    for candidate in preferred_paths:
+                        if os.path.exists(candidate):
+                            vosk_model_path = candidate
+                            break
+                if vosk_model_path and os.path.exists(vosk_model_path):
                     self.vosk_kws = VoskKWSEngine(
                         model_path=vosk_model_path,
                         keywords=self.keywords,
                         sample_rate=sample_rate,
-                        confidence_threshold=0.7,
-                        use_grammar=True
+                        confidence_threshold=0.75,
+                        use_grammar=True,
+                        confirmation_hits=1,
+                        confirmation_window_s=1.2,
+                        trigger_cooldown_s=1.5,
+                        exact_match_only=True
                     )
-                    print(f"✅ Vosk KWS engine enabled")
+                    print(f"✅ Vosk KWS engine enabled (model: {os.path.basename(vosk_model_path)})")
                 else:
-                    print(f"⚠️  Vosk model not found at: {vosk_model_path}")
-                    print("Please run: python download_vosk_model.py cn-small")
+                    print("⚠️  Vosk model not found in models/vosk_models")
+                    print("Recommended: python download_vosk_model.py cn-large")
+                    print("Fallback option: python download_vosk_model.py cn-small")
             except Exception as e:
                 print(f"⚠️  Failed to initialize Vosk KWS: {e}")
                 self.vosk_kws = None
@@ -253,6 +265,10 @@ class VADKWSProcessor:
         
         # Thread pool
         self.threads = []
+
+        # Keep backward compatibility: kws_processing_thread is implemented as a
+        # module-level function below, but start() expects an instance attribute.
+        self.kws_processing_thread = lambda: kws_processing_thread(self)
         
         # Check audio devices and initialize models
         self.check_audio_devices()
@@ -651,7 +667,12 @@ class VADKWSProcessor:
                     stream_callback=self.audio_callback
                 )
                 self.stream.start_stream()
-                print(f"Voice activation system started, waiting for speech...")
+                print(f"✅ Voice activation system started, waiting for speech...")
+                print(f"  - Sample rate: {self.sample_rate} Hz")
+                print(f"  - Chunk size: {self.chunk_size} samples")
+                print(f"  - Channels: {self.channels}")
+                print(f"  - Format: {self.format}")
+                print(f"  - Device: {device_name} (index: {self.input_device_index})")
             
             # Start processing threads (excluding deprecated audio_input_thread and plotting_thread)
             thread_names = ['KWSProcessing']
@@ -702,6 +723,14 @@ class VADKWSProcessor:
     def audio_callback(self, in_data, frame_count, time_info, status):
         """Audio stream callback function"""
         try:
+            # Debug: Print once every 100 calls to avoid spam
+            if not hasattr(self, '_callback_count'):
+                self._callback_count = 0
+                print("🎙️  Audio callback started receiving data")
+            self._callback_count += 1
+            if self._callback_count % 100 == 0 and self.isDebug:
+                print(f"DEBUG: Audio callback called {self._callback_count} times")
+            
             # Convert bytes to numpy array and handle multi-channel input
             audio_data = np.frombuffer(in_data, dtype=np.int16)
             
@@ -746,10 +775,15 @@ class VADKWSProcessor:
                     if self.isDebug:
                         print(f"Denoising error: {e}")
                     audio_denoised = audio_data_norm
+                    # Still update detected_vad with default value
+                    with self.lock:
+                        self.denoised_audio_buffer.append((audio_data_norm, frame_end_time))
+                        self.detected_vad.append((0.0, frame_end_time))
             else:
-                # No denoiser, just copy original
+                # No denoiser, just copy original and set VAD to 0.0 (no detection)
                 with self.lock:
                     self.denoised_audio_buffer.append((audio_data_norm, frame_end_time))
+                    self.detected_vad.append((0.0, frame_end_time))
                 
             # Call audio frame callback if set (for recording feature)
             if self.audio_frame_callback is not None:
@@ -1160,423 +1194,261 @@ class VADKWSProcessor:
 
         return []  # Return empty list since we're using blit=False
     
-    def kws_processing_thread(self):
-        """Thread for processing Keyword Spotting with adaptive window"""
-        print("KWS processing thread started")
-        
-        # 添加调试变量
-        process_count = 0
-        last_boundary = 0
-        last_chunk_hash = None
-        # Constants for voice detection
-        AMPLITUDE_THRESHOLD = self.threshold
-        SLIP_WINDOW_TIME = 0.1 # seconds
-        SLIP_WINDOW_SIZE = int(SLIP_WINDOW_TIME * self.sample_rate)
-        MIN_CHUNK = self.chunk_size
-        MAX_CHUNK = 50 * MIN_CHUNK
-        PAUSE_VOICE_THRESHOLD = self.pause_threshold  # v2.0: Use adjustable threshold
-        END_CONV_THRESHOLD = self.time_to_end_conversation
-        chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
-        
-        # Pre-buffer: Keep 300ms before speech start to avoid losing initial sounds
-        PRE_BUFFER_TIME = 0.3  # seconds
-        PRE_BUFFER_SIZE = int(PRE_BUFFER_TIME * self.sample_rate)
-        
-        # Post-buffer: Keep 150ms after speech end to avoid cutting off final sounds (reduced for faster response)
-        POST_BUFFER_TIME = 0.15  # seconds
-        POST_BUFFER_SIZE = int(POST_BUFFER_TIME * self.sample_rate)
-        
-        # Fix: audio_buffer_kws should be float32 to match denoised audio data
-        audio_buffer_kws = np.array([], dtype=np.float32)
-        silence_timer = 0
-        start_pos = 0
-        speech_start_time = None  # 记录真实的语音开始时间
-        search_start = start_pos + MIN_CHUNK
-        # Add initial keyword status
+def kws_processing_thread(self):
+    """Thread for processing Keyword Spotting using Silero VAD only"""
+    print("KWS processing thread started (using Silero VAD only)")
+    
+    # Silero VAD-based speech collection
+    audio_buffer_kws = np.array([], dtype=np.float32)
+    is_collecting_speech = False  # 是否正在收集语音
+    silence_duration = 0.0  # 静音持续时间
+    speech_start_time = None  # 语音开始时间
+    last_vad_state = 0.0  # 上一个VAD状态
+    
+    # Constants
+    PAUSE_THRESHOLD = self.pause_threshold  # 静音阈值（秒）
+    VAD_THRESHOLD = 0.05  # VAD状态阈值（0.1表示语音，0.0表示静音）
+    MIN_SPEECH_DURATION = 0.1  # 最小语音时长（秒）
+    MIN_SPEECH_SAMPLES = int(MIN_SPEECH_DURATION * self.sample_rate)
+    CONTINUOUS_ASR_WINDOW_S = 2.0  # 连续识别窗口长度（秒）
+    CONTINUOUS_ASR_HOP_S = 0.8  # 连续识别滑窗步长（秒）
+    CONTINUOUS_ASR_WINDOW_SAMPLES = int(CONTINUOUS_ASR_WINDOW_S * self.sample_rate)
+    CONTINUOUS_ASR_HOP_SAMPLES = int(CONTINUOUS_ASR_HOP_S * self.sample_rate)
+    continuous_samples_since_last_asr = 0
+    asr_unavailable_warned = False
+    no_kws_warned = False
+
+    def set_keyword_state(active, ts, source=""):
+        """Update keyword active state and history in one place."""
         with self.lock:
-            current_time = time.time()
-            self.keyword_status_history.append((False, current_time))
-        
-        while not self.stop_event.is_set():
-            try:
-                #
-                #  Get audio data from queue
-                #
-                
-                # DEBUG: 打印当前状态
+            changed = (self.is_keyword_detected != active)
+            self.is_keyword_detected = active
+            # Keep history compact: always log state transitions, and periodically
+            # log unchanged state to keep ax3 line continuous.
+            if changed or not self.keyword_status_history or (ts - self.keyword_status_history[-1][1]) > 0.5:
+                self.keyword_status_history.append((active, ts))
+        if changed:
+            print(f"Keyword state -> {'ACTIVE' if active else 'INACTIVE'} ({source})")
+
+    def run_asr_inference(asr_audio, result_ts, reason="segment"):
+        """Run ASR and update keyword/status buffers."""
+        nonlocal asr_unavailable_warned
+
+        if self.asr_model is None:
+            if not asr_unavailable_warned:
+                print("⚠️  ASR model not available")
+                asr_unavailable_warned = True
+            return
+
+        try:
+            print(f"🔍 Running ASR ({reason}) on {len(asr_audio)} samples ({len(asr_audio)/self.sample_rate:.2f}s)")
+
+            asr_result = self.asr_model.generate(
+                input=asr_audio,
+                output_type="dict",
+                cache={},
+                language="zn",  # "zn", "en", "yue", "ja", "ko", "nospeech" "auto"
+                use_itn=True,
+                batch_size_s=60,
+                merge_vad=True,
+                merge_length_s=15,
+                disable_log=True,
+                disable_progress_bar=True
+            )
+
+            if not (isinstance(asr_result, list) and len(asr_result) > 0):
+                return
+
+            result_dict = asr_result[0]
+            if isinstance(result_dict, dict):
+                text = result_dict.get('text', '')
+            elif isinstance(result_dict, str):
+                text = result_dict
+            else:
+                text = str(result_dict)
+
+            if not text:
+                return
+
+            text = re.sub(r"<\|.*?\|>", "", text)
+            text = re.sub(r"[^\w\s]", "", text)
+            text = text.strip()
+
+            if not text:
+                return
+
+            print(f"✅ ASR ({reason}) result: {text}")
+
+            with self.lock:
                 if self.isDebug:
-                    buffer_len = len(audio_buffer_kws)
-                    print(f"DEBUG: Start read data from queue - buffer_len={buffer_len}, start_pos={start_pos}, find_valid_start={self.find_valid_start}")
+                    print(f"Appending {text} at {result_ts} to buffer")
+                self.detected_keywords.append((text, result_ts))
+                self.current_kws_results = [{'text': text}]
 
-                try:
-                    audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
-                    if self.isDebug:
-                        print(f"DEBUG: Got audio chunk at {timestamp}, length={len(audio_data)}")
-                except queue.Empty:
-                    if self.isDebug:
-                        print("No audio data in queue")
-                        # break
-                    continue
-                
-                # v2.0: State machine - lightweight KWS in SLEEPING state
-                current_state = self.state
-                if current_state == 'SLEEPING' and self.vosk_kws is not None:
-                    # In SLEEPING state: only run Vosk for wake word detection
-                    try:
-                        result = self.vosk_kws.detect_keyword(audio_data, return_partial=False)
-                        if result['detected']:
-                            # Wake word detected! Switch to AWAKE state
-                            with self.lock:
-                                self.state = 'AWAKE'
-                                self.last_speech_time = time.time()
-                                self.keyword_status_history.append((True, timestamp))
-                            print(f"🟢 WAKE WORD DETECTED: '{result['keyword']}' (confidence: {result['confidence']:.2f})")
-                            print(f"State changed: SLEEPING → AWAKE")
-                            # Add to detected keywords for visualization
-                            with self.lock:
-                                self.detected_keywords.append((result['keyword'], timestamp))
-                    except Exception as e:
-                        if self.isDebug:
-                            print(f"Vosk KWS error: {e}")
-                    # In SLEEPING state, skip FunASR processing
-                    continue
-                
-                # Check for AWAKE timeout (auto sleep after no speech)
-                if current_state == 'AWAKE':
-                    if time.time() - self.last_speech_time > self.awake_timeout:
-                        with self.lock:
-                            self.state = 'SLEEPING'
-                            print(f"⚫ Auto-sleep: AWAKE → SLEEPING (timeout: {self.awake_timeout}s)")
-                        continue
-                
-                # Data is already normalized and single-channel from callback
-                audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
-                buffer_len = len(audio_buffer_kws)
-                self.keyword_status_history.append((self.is_keyword_detected, timestamp))
-                
-
-                # 寻找语音开始点
-                if not self.find_valid_start:
-                    if self.isDebug:
-                        print(f"DEBUG: Searching for speech start...")
-                    # while start_pos + MIN_CHUNK <= buffer_len:
-                    while start_pos + SLIP_WINDOW_SIZE <= buffer_len:
-                        slip_window = audio_buffer_kws[start_pos:start_pos + SLIP_WINDOW_SIZE]
-                        if slip_window.size < SLIP_WINDOW_SIZE:
-                            break  # Not enough data for a window
-                        
-                        start_mean = np.mean(np.abs(slip_window))
-                        if start_mean < AMPLITUDE_THRESHOLD:
-                            timestamp = timestamp + SLIP_WINDOW_TIME  # Update timestamp for current position
-                            start_pos += SLIP_WINDOW_SIZE
-                            silence_timer += chunk_duration
-                            with self.lock:
-                                self.speech_level.append((0,timestamp))
-                            # Update VAD status for this segment (no speech)
-                            # with self.lock:
-                            #     self.detected_vad.append((False, timestamp))
-                            
-
-                            if silence_timer >= END_CONV_THRESHOLD:
-                                with self.lock:
-                                    if self.is_keyword_detected:
-                                        if self.isDebug:
-                                            print(f"No voice detected for {END_CONV_THRESHOLD}s, resetting keyword detection")
-                                        self.is_keyword_detected = False
-                                        # Record keyword status change
-                                        self.keyword_status_history.append((self.is_keyword_detected, timestamp))
-                                silence_timer = 0  # Reset silence timer
-                            continue  # continue to next WINDOW Voice CHECK
-                        else:
-                            self.find_valid_start = True
-                            # 关键修复：计算真实的语音开始时间并预留前缓冲
-                            # 往前退 PRE_BUFFER_SIZE 个样本来保留语音起始部分
-                            actual_start_pos = max(0, start_pos - PRE_BUFFER_SIZE)
-                            
-                            speech_start_time = timestamp #Time stamp is end of speech
-                            with self.lock:
-                                self.speech_level.append((0.5,timestamp))
-                            silence_timer = 0
-                            
-                            print(f"🎤 Speech start detected: amplitude={start_mean:.4f} > threshold={AMPLITUDE_THRESHOLD}, pre-buffer={PRE_BUFFER_TIME}s")
- 
-                            # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
-                            if self.isDebug:
-                                print(f"DEBUG: Found speech start at start_pos={start_pos}, with pre-buffer actual_start={actual_start_pos}")
-                            
-                            # Update start_pos to include pre-buffer
-                            start_pos = actual_start_pos
-                            break
-                    
-                    #Trim buffer if no valid speech data
-                    if self.isDebug:
-                        print(f" len of audio_buffer is: {len(audio_buffer_kws)} before trimming")
-                    audio_buffer_kws = audio_buffer_kws[start_pos:]
-                    start_pos = 0
-                    if len(audio_buffer_kws) == 0:
-                        self.find_valid_start = False  
-                        continue
-                    else:
-                        boundary = None                            
-                        search_start = start_pos + MIN_CHUNK
-                #     # trim buffer if not find valid start
-                    if self.isDebug:
-                        print(f" len of audio_buffer is: {len(audio_buffer_kws)} after trimming")
-                #
-                # Find end point: search for silence within [MIN_CHUNK, MAX_CHUNK]
-                #
-                if self.isDebug:
-                    print(f"DEBUG: Searching for speech stop...")
-                buffer_len = len(audio_buffer_kws)
-                search_end = min(buffer_len, start_pos + MAX_CHUNK)
-                for i in range(search_start, search_end, SLIP_WINDOW_SIZE):
-                    window_end = min(i + SLIP_WINDOW_SIZE, search_end)
-                    if speech_start_time is not None:
-                        end_time = speech_start_time + (window_end - start_pos) / self.sample_rate
-                    else:
-                        # 如果 speech_start_time 为 None，使用当前时间作为合理的估计值
-                        current_time = time.time()
-                        end_time = current_time - (window_end - start_pos) / self.sample_rate
-                        # 顺便更新speech_start_time以避免后续处理出现None
-                        speech_start_time = current_time - (buffer_len / self.sample_rate)
-                        print(f"修正: speech_start_time为None，已更新为估计值{speech_start_time}")
-                    
-                    window = audio_buffer_kws[i:window_end]
-                    if window.size == 0:
-                        continue
-                        
-                    mean_amp = np.mean(np.abs(window))
-                    if mean_amp < AMPLITUDE_THRESHOLD:
-                        # Found silence - this is our endpoint
-                        silence_timer += SLIP_WINDOW_TIME                            
-                        if silence_timer >= PAUSE_VOICE_THRESHOLD: # Speaker will pause to wait feedback or response
-                            # Add post-buffer to avoid cutting off final sounds
-                            boundary = min(window_end + POST_BUFFER_SIZE, buffer_len)
-                            silence_timer = 0  # Reset silence timer
-                            with self.lock:
-                                self.speech_level.append((0,end_time))
-                            
-                            print(f"🔴 Speech end detected: silence={PAUSE_VOICE_THRESHOLD}s, post-buffer={POST_BUFFER_TIME}s")
-                            break
-                        else:
-                            continue
-                    else:
-                        # Update VAD status (speech continues)
-                        # with self.lock:
-                        #     current_time = timestamp + (i - start_pos) / self.sample_rate
-                        #     self.detected_vad.append((True, current_time))
-                        with self.lock:
-                            self.speech_level.append((0.5,end_time))
-                        silence_timer = 0  # Reset silence timer
-                # else:
-                if boundary is None:
-                    if buffer_len < MAX_CHUNK:
-                        search_start = search_end # next time start from current search_end
-                        continue
-                    else:
-                        # No silence found, use maximum chunk size
-                        boundary = min(start_pos + MAX_CHUNK, buffer_len)
-                
-                # # Extract the active speech window
-                chunk_data = audio_buffer_kws[start_pos:boundary]
-                if len(chunk_data) < MIN_CHUNK:
-                    boundary = None
-                    self.find_valid_start = False
-                    print(f"⚠️  Speech segment too short: {len(chunk_data)} samples < {MIN_CHUNK} required, waiting for more audio")
-                    continue
-
-                with self.lock:
-                    # 确保speech_start_time不为None
-                    if speech_start_time is None:
-                        current_time = time.time()
-                        speech_start_time = current_time - (len(chunk_data) / self.sample_rate)
-                        print(f"警告: 添加到audio_buffer_speechonly前修正speech_start_time为: {speech_start_time}")
-                    
-                    self.audio_buffer_speechonly.append((chunk_data, speech_start_time))
-                    if self.isDebug:
-                        print(f"Appending {chunk_data.size} samples {chunk_data.size / self.sample_rate:.1f} seconds of speech to buffer")
-                
-                #
-                # vad detection
-                #
-                if self.vad_model is not None:
-                    vad_result = self.vad_model.generate(
-                            audio_buffer_kws,
-                            sampling_rate=self.sample_rate,
-                            return_tensors="pt"
-                        )
-                    print(f"VAD result: {vad_result}")
-
-                    # 处理VAD结果
-                    if self.isDebug:
-                        print(f"DEBUG: Processing VAD to speech ...")
-                    if isinstance(vad_result, list) and len(vad_result) > 0:
-                        vad_item = vad_result[0]  # 获取第一个结果
-                        vad_value = vad_item.get('value', [])  # 获取value列表
-                    
-                        # Note: FunASR VAD results are for segmentation only
-                        # Silero VAD status is displayed in ax2 (updated in audio_callback)
-                        # with self.lock:
-                        #     if not vad_value:
-                        #         # value为空列表时，标记为0 - 但确保时间戳不为None
-                        #         if speech_start_time is not None:
-                        #             self.detected_vad.append((0, speech_start_time))
-                        #         else:
-                        #             print("警告: speech_start_time为None，跳过添加VAD检测记录")
-                        #     else:
-                        #         # 对于每个检测到的语音区间
-                        #         for segment in vad_value:
-                        #             start_sample, end_sample = segment
-                        #             # 将采样点索引转换为时间戳，但先检查speech_start_time是否为None
-                        #             if speech_start_time is not None:
-                        #                 start_time = speech_start_time + start_sample / self.sample_rate
-                        #                 end_time = speech_start_time + end_sample / self.sample_rate
-                        #                 
-                        #                 # 记录语音区间的起始和结束，使用0.5表示检测到语音
-                        #                 self.detected_vad.append((0.5, start_time))
-                        #                 self.detected_vad.append((0, end_time))
-                        #             else:
-                        #                 print("警告: speech_start_time为None，无法计算VAD时间戳")
-                else:
-                    if self.isDebug:
-                        print("VAD model not available, skipping VAD detection")
-
-                # Process through ASR model - 仅当VAD检测的语音段足够长时才调用ASR
-                if self.isDebug:
-                    print(f"DEBUG: Processing speech ASR...")
-                
-                # 检查是否有有效的VAD结果并且语音段长度足够
-                valid_speech_segment = False
-                if self.vad_model is not None and 'vad_result' in locals() and isinstance(vad_result, list) and len(vad_result) > 0:
-                    vad_item = vad_result[0]
-                    vad_value = vad_item.get('value', [])
-                    
-                    # 检查是否有任何语音段长度超过500个样本点
-                    for segment in vad_value:
-                        start_sample, end_sample = segment
-                        segment_length = end_sample - start_sample
-                        if segment_length > 150:  # 只有当语音段长度超过150时才认为有效
-                            valid_speech_segment = True
-                            if self.isDebug:
-                                print(f"Found valid speech segment with length {segment_length} samples")
-                            break
-                    
-                    # Debug: Print FunASR VAD results
-                    if not valid_speech_segment and vad_value:
-                        max_segment_length = max([end - start for start, end in vad_value]) if vad_value else 0
-                        print(f"⚠️  FunASR VAD: Speech segments too short (max: {max_segment_length} samples < 150), ASR skipped")
-                    elif not vad_value:
-                        print(f"⚠️  FunASR VAD: No speech detected in {len(chunk_data)} samples, ASR skipped")
-                
-                if self.asr_model is not None and (valid_speech_segment or self.vad_model is None):
-                    try:
-                        print(f"🔍 Running ASR on {len(chunk_data)} samples ({len(chunk_data)/self.sample_rate:.2f}s)")
-                        if self.isDebug:
-                            print(f"Running ASR on chunk of {len(chunk_data)} samples")
-                        asr_result = self.asr_model.generate(
-                            input=chunk_data,
-                            output_type="dict",
-                            cache={},
-                            language="zn",  # "zn", "en", "yue", "ja", "ko", "nospeech" "auto"
-                            # language="zn" "en",  # "zn", "en", "yue", "ja", "ko", "nospeech" "auto"
-                            use_itn=True,
-                            batch_size_s=60,
-                            merge_vad=True,  #
-                            merge_length_s=15,
-                            disable_log=True,
-                            disable_progress_bar=True
-                        )
-                        
-                        # Process ASR results
-                        if isinstance(asr_result, list) and len(asr_result) > 0:
-                            result_dict = asr_result[0]
-                            if isinstance(result_dict, dict):
-                                text = result_dict.get('text', '')
-                            elif isinstance(result_dict, str):
-                                text = result_dict
-                            else:
-                                text = str(result_dict)
-                                
-                            if text:
-                                # Clean up text
-                                text = re.sub(r"<\|.*?\|>", "", text)
-                                text = re.sub(r"[^\w\s]", "", text)  # 去除所有标点符号
-                                if self.isDebug:
-                                    print(f"ASR result: {text}")
-                                    if valid_speech_segment:
-                                        print("Result from valid speech segment (length > 150 samples)")
-                                    else:
-                                        print("Result from VAD-less processing")
-                                
-                                # Save to detected keywords with timestamp
-                                with self.lock:
-                                    # kws_sample = chunk_start_sample + start_pos
-                                    if self.isDebug:
-                                        print(f"Appending {text} at {speech_start_time} to buffer")
-                                    self.detected_keywords.append((text, speech_start_time)) #datetime.now())) timestamp is end time of detected keyword
-                                    
-                                    # 保存当前ASR结果，用于文件命名
-                                    self.current_kws_results = [{'text': text}]
-                                    if self.isDebug:
-                                        print(f"Current KWS results updated: {self.current_kws_results}")
-
-                                # Check if text contains any of our keywords
-                                if not self.is_keyword_detected:
-                                    for keyword in self.keywords:
-                                        if keyword.lower() in text.lower():
-                                            if self.isDebug:
-                                                print(f"Keyword detected: {keyword}")
-                                            with self.lock:
-                                                self.is_keyword_detected = True
-                                                # Record keyword status change with timestamp
-                                                self.keyword_status_history.append((self.is_keyword_detected, speech_start_time))
-                                            break
-                                
-                                # Check for conversation end keywords
-
-                                end_keywords = self.stopwords if self.stopwords else ["bye", "再见", "goodbye", "结束", "停止"]
-                                for end_kw in end_keywords:
-                                    if end_kw.lower() in text.lower():                                        
-                                        if self.isDebug:
-                                            print(f"End keyword detected: {end_kw}")
-                                        with self.lock:
-                                            self.is_keyword_detected = False
-                                            # Record keyword status change with timestamp
-                                            self.keyword_status_history.append((self.is_keyword_detected, speech_start_time))
-                                        break
-                    except Exception as e:
-                        if self.isDebug:
-                            print(f"KWS inference error: {e}")
-                        traceback.print_exc()
-                self.find_valid_start = False # end of 1 processing
-
-                # Move to next position
-                # start_pos = boundary  # 关键：推进start_pos到boundary
-
-                # Retain unprocessed tail
-                if self.isDebug:
-                    print(f" len of audio_buffer_kws: {len(audio_buffer_kws)} before trimming")
-                if boundary < buffer_len:
-                    if self.isDebug:
-                        print(f"DEBUG: Trimming buffer from {len(audio_buffer_kws)} to {len(audio_buffer_kws) - boundary}")
-                    audio_buffer_kws = audio_buffer_kws[boundary:]
-                    start_pos = 0  # buffer已裁剪，start_pos归零
-                else:
-                    if self.isDebug:print(f"DEBUG: Clearing整个缓冲区")
-                    audio_buffer_kws = np.array([], dtype=np.float32)
-                start_pos = 0
-                if self.isDebug:
-                    print(f" len of audio_buffer_kws: {len(audio_buffer_kws)} after trimming")
-            except Exception as e:
-                if self.isDebug:
-                    print(f"Error in KWS thread: {e}")
-                traceback.print_exc()
-                if self.isDebug:
+            # End keyword can stop active conversation mode
+            end_keywords = self.stopwords if self.stopwords else ["bye", "再见", "goodbye", "结束", "停止"]
+            if isinstance(end_keywords, str):
+                end_keywords = [end_keywords]
+            for end_kw in end_keywords:
+                if end_kw.lower() in text.lower():
+                    print(f"🛑 End keyword detected: {end_kw}")
+                    set_keyword_state(False, result_ts, source=f"end_kw:{end_kw}")
                     break
-            
-            # 重要：检查是否需要保存录音文件（将此逻辑移出异常处理块）
+
+        except Exception as e:
+            print(f"ASR inference error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Add initial keyword status
+    with self.lock:
+        current_time = time.time()
+        self.keyword_status_history.append((False, current_time))
+    
+    while not self.stop_event.is_set():
+        try:
+            # Get audio data from queue
             try:
-                # print(f"DEBUG: 检查是否需要保存录音 - recording_done={self.recording_done}, frames={len(self.recording_frames) if self.recording_frames else 0}")
+                audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
+                if self.isDebug:
+                    print(f"DEBUG: Got audio chunk at {timestamp}, length={len(audio_data)}")
+            except queue.Empty:
+                if self.isDebug:
+                    print("No audio data in queue")
+                continue
+            
+            # v2.0: State machine - lightweight KWS in SLEEPING state
+            current_state = self.state
+            if current_state == 'SLEEPING' and self.vosk_kws is not None:
+                # In SLEEPING state: only run Vosk for wake word detection
+                try:
+                    result = self.vosk_kws.detect_keyword(audio_data, return_partial=False)
+                    if result['detected']:
+                        # Wake word detected! Switch to AWAKE state
+                        with self.lock:
+                            self.state = 'AWAKE'
+                            self.last_speech_time = time.time()
+                        set_keyword_state(True, timestamp, source=f"wake:{result['keyword']}")
+                        print(f"🟢 WAKE WORD DETECTED: '{result['keyword']}' (confidence: {result['confidence']:.2f})")
+                        print(f"State changed: SLEEPING → AWAKE")
+                        # Add to detected keywords for visualization
+                        with self.lock:
+                            self.detected_keywords.append((f"WAKE:{result['keyword']}", timestamp))
+                except Exception as e:
+                    if self.isDebug:
+                        print(f"Vosk KWS error: {e}")
+                # In SLEEPING state, skip FunASR processing
+                continue
+
+            # Strict gate: ASR must not run before keyword activation.
+            if current_state == 'SLEEPING' and self.vosk_kws is None:
+                if not no_kws_warned:
+                    print("⚠️  KWS engine unavailable in SLEEPING state, ASR is gated and will not run")
+                    no_kws_warned = True
+                if self.isDebug:
+                    print("DEBUG: SLEEPING state without KWS engine, skipping ASR")
+                continue
+            
+            # Check for AWAKE timeout (auto sleep after no speech)
+            if current_state == 'AWAKE':
+                if time.time() - self.last_speech_time > self.awake_timeout:
+                    with self.lock:
+                        self.state = 'SLEEPING'
+                    set_keyword_state(False, time.time(), source="awake_timeout")
+                    print(f"⚫ Auto-sleep: AWAKE → SLEEPING (timeout: {self.awake_timeout}s)")
+                    continue
+            
+            # Get current Silero VAD state from detected_vad deque
+            current_vad_state = 0.0
+            with self.lock:
+                if self.detected_vad:
+                    current_vad_state, vad_timestamp = self.detected_vad[-1]
+                else:
+                    # If detected_vad is empty, assume speech for debugging
+                    if self.isDebug:
+                        print("DEBUG: detected_vad is empty, assuming speech")
+                    current_vad_state = 0.1  # Assume speech to allow audio through
+                # Keep ax3 status line updated even when state does not change.
+                if not self.keyword_status_history or (timestamp - self.keyword_status_history[-1][1]) > 0.5:
+                    self.keyword_status_history.append((self.is_keyword_detected, timestamp))
+            
+            # Speech start detection
+            if not is_collecting_speech and current_vad_state > VAD_THRESHOLD:
+                # VAD detected speech start
+                is_collecting_speech = True
+                speech_start_time = timestamp
+                silence_duration = 0.0
+                audio_buffer_kws = np.array([], dtype=np.float32)  # Reset buffer
+                print(f"🎤 Speech start detected (Silero VAD: {current_vad_state:.2f})")
+                
+                with self.lock:
+                    self.speech_level.append((0.5, timestamp))
+            
+            # Collect speech data
+            if is_collecting_speech:
+                audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
+                frame_duration = len(audio_data) / self.sample_rate
+                
+                # Check for silence
+                if current_vad_state <= VAD_THRESHOLD:
+                    # VAD detected silence
+                    silence_duration += frame_duration
+                    
+                    if self.isDebug:
+                        print(f"DEBUG: Silence detected, duration={silence_duration:.2f}s")
+                    
+                    # Silence exceeds threshold - finalize speech segment
+                    if silence_duration >= PAUSE_THRESHOLD:
+                        print(f"🔴 Speech end detected: silence={silence_duration:.2f}s (Silero VAD)")
+                        
+                        # Check if we have enough speech data
+                        if len(audio_buffer_kws) < MIN_SPEECH_SAMPLES:
+                            print(f"⚠️  Speech segment too short: {len(audio_buffer_kws)} samples < {MIN_SPEECH_SAMPLES} required, discarding")
+                            is_collecting_speech = False
+                            audio_buffer_kws = np.array([], dtype=np.float32)
+                            silence_duration = 0.0
+                            continue
+                        
+                        # Save speech segment to buffer
+                        with self.lock:
+                            if speech_start_time is None:
+                                speech_start_time = time.time() - (len(audio_buffer_kws) / self.sample_rate)
+                                print(f"警告: speech_start_time为None，已修正为: {speech_start_time}")
+                            
+                            self.audio_buffer_speechonly.append((audio_buffer_kws.copy(), speech_start_time))
+                            self.speech_level.append((0, timestamp))
+                            if self.isDebug:
+                                print(f"Appending {len(audio_buffer_kws)} samples ({len(audio_buffer_kws) / self.sample_rate:.2f}s) of speech to buffer")
+                        run_asr_inference(audio_buffer_kws, speech_start_time, reason="final")
+                        
+                        # Reset state for next speech segment
+                        is_collecting_speech = False
+                        audio_buffer_kws = np.array([], dtype=np.float32)
+                        silence_duration = 0.0
+                        speech_start_time = None
+                        continuous_samples_since_last_asr = 0
+                
+                else:
+                    # Speech continues, reset silence timer
+                    silence_duration = 0.0
+                    continuous_samples_since_last_asr += len(audio_data)
+
+                    # 连续说话场景：按滑动窗口增量识别，不必等待长停顿
+                    if len(audio_buffer_kws) >= CONTINUOUS_ASR_WINDOW_SAMPLES and \
+                       continuous_samples_since_last_asr >= CONTINUOUS_ASR_HOP_SAMPLES:
+                        streaming_window = audio_buffer_kws[-CONTINUOUS_ASR_WINDOW_SAMPLES:]
+                        window_start_ts = timestamp - (len(streaming_window) / self.sample_rate)
+                        run_asr_inference(streaming_window, window_start_ts, reason="streaming")
+                        continuous_samples_since_last_asr = 0
+
+                    with self.lock:
+                        self.speech_level.append((0.5, timestamp))
+            
+            # Update last VAD state
+            last_vad_state = current_vad_state
+            
+            # Check and save recording if needed
+            try:
                 with self.lock:
                     if self.recording_done and self.recording_frames:
                         # 如果录音已完成但尚未保存，且ASR处理可能已完成，保存录音
@@ -1588,10 +1460,16 @@ class VADKWSProcessor:
                             print("KWS线程中保存录音失败")
             except Exception as e:
                 print(f"Error saving recording in KWS thread: {e}")
+                import traceback
                 traceback.print_exc()
-
-        if self.isDebug:
-            print("KWS processing thread stopped")
+        
+        except Exception as e:
+            print(f"Error in KWS processing thread: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    if self.isDebug:
+        print("KWS processing thread stopped")
 
 def main():
     """Main function to run the VAD/KWS processor"""

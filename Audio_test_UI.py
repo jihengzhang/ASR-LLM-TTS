@@ -48,7 +48,7 @@ class AudioTestFrame(wx.Frame):
             silence_duration=0.3,
             buffer_duration=5.0,
             time_to_end_conversation=3,
-            keywords=["hello", "Hi panda", "hi siri", "你好"],
+            keywords=["你好", "小爱", "小度", "开始", "hello", "hi panda", "hi siri"],
             stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"],
             pause_threshold=0.3,  # 0.3s pause to detect speech end (faster response for streaming)
             force_denoise_all_frames=True  # Default: always denoise all frames

@@ -11,6 +11,7 @@ SSO: 212597558
 
 import json
 import logging
+import time
 import numpy as np
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -41,7 +42,11 @@ class VoskKWSEngine:
         keywords: List[str],
         sample_rate: int = 16000,
         confidence_threshold: float = 0.7,
-        use_grammar: bool = True
+        use_grammar: bool = True,
+        confirmation_hits: int = 2,
+        confirmation_window_s: float = 1.2,
+        trigger_cooldown_s: float = 1.5,
+        exact_match_only: bool = True
     ):
         """
         Initialize Vosk KWS Engine
@@ -52,12 +57,20 @@ class VoskKWSEngine:
             sample_rate: Audio sample rate in Hz
             confidence_threshold: Minimum confidence for keyword detection (0-1)
             use_grammar: Use grammar mode for faster recognition (recommended)
+            confirmation_hits: Required repeated hits before trigger
+            confirmation_window_s: Max seconds between repeated hits
+            trigger_cooldown_s: Refractory period after a successful trigger
+            exact_match_only: Require exact keyword match instead of substring
         """
         self.model_path = Path(model_path)
         self.keywords = [kw.lower() for kw in keywords]  # Normalize to lowercase
         self.sample_rate = sample_rate
         self.confidence_threshold = confidence_threshold
         self.use_grammar = use_grammar
+        self.confirmation_hits = max(1, int(confirmation_hits))
+        self.confirmation_window_s = max(0.1, float(confirmation_window_s))
+        self.trigger_cooldown_s = max(0.0, float(trigger_cooldown_s))
+        self.exact_match_only = exact_match_only
         
         self.model = None
         self.recognizer = None
@@ -65,6 +78,12 @@ class VoskKWSEngine:
         # Statistics
         self.total_detections = 0
         self.keyword_counts = {kw: 0 for kw in self.keywords}
+
+        # Low-false-trigger state
+        self._candidate_keyword = None
+        self._candidate_hits = 0
+        self._last_candidate_time = 0.0
+        self._last_trigger_time = 0.0
         
         # Initialize Vosk
         if not VOSK_AVAILABLE:
@@ -95,11 +114,18 @@ class VoskKWSEngine:
             
             # Configure recognizer
             self.recognizer.SetMaxAlternatives(0)  # Don't need alternatives
-            self.recognizer.SetWords(False)        # Don't need word-level timing
+            self.recognizer.SetWords(True)         # Enable word info for confidence estimation
             
             logging.info(f"Vosk KWS Engine initialized successfully")
             logging.info(f"Keywords: {', '.join(self.keywords)}")
             logging.info(f"Confidence threshold: {self.confidence_threshold}")
+            logging.info(
+                "Low-false-trigger mode: hits=%s, window=%.2fs, cooldown=%.2fs, exact_match=%s",
+                self.confirmation_hits,
+                self.confirmation_window_s,
+                self.trigger_cooldown_s,
+                self.exact_match_only,
+            )
         
         except Exception as e:
             logging.error(f"Failed to initialize Vosk: {e}")
@@ -160,29 +186,15 @@ class VoskKWSEngine:
                 result = json.loads(result_json)
                 
                 text = result.get('text', '').strip().lower()
-                confidence = result.get('confidence', 0.0)
+                confidence = self._extract_confidence(result)
                 
                 # Check if any keyword is in the recognized text
-                detected_keyword = None
-                for keyword in self.keywords:
-                    if keyword in text:
-                        detected_keyword = keyword
-                        break
-                
-                # Update statistics
-                if detected_keyword and confidence >= self.confidence_threshold:
-                    self.total_detections += 1
-                    self.keyword_counts[detected_keyword] += 1
-                    
-                    logging.info(f"✅ Keyword detected: '{detected_keyword}' "
-                               f"(confidence: {confidence:.2f})")
-                    
-                    return {
-                        'detected': True,
-                        'keyword': detected_keyword,
-                        'text': text,
-                        'confidence': confidence
-                    }
+                detected_keyword = self._match_keyword(text)
+
+                # Low-false-trigger decision path
+                detection = self._apply_detection_policy(detected_keyword, text, confidence)
+                if detection is not None:
+                    return detection
             
             # Check partial result if requested
             if return_partial:
@@ -218,7 +230,91 @@ class VoskKWSEngine:
             if self.use_grammar:
                 self._set_grammar()
             self.recognizer.SetMaxAlternatives(0)
-            self.recognizer.SetWords(False)
+            self.recognizer.SetWords(True)
+
+            # Also reset low-false-trigger state to avoid stale confirmation.
+            self._candidate_keyword = None
+            self._candidate_hits = 0
+            self._last_candidate_time = 0.0
+
+    def _extract_confidence(self, result: Dict) -> float:
+        """Extract confidence from Vosk result with safe fallbacks."""
+        direct = result.get('confidence')
+        if isinstance(direct, (int, float)):
+            return float(direct)
+
+        words = result.get('result', [])
+        if isinstance(words, list) and words:
+            confs = [w.get('conf') for w in words if isinstance(w, dict) and isinstance(w.get('conf'), (int, float))]
+            if confs:
+                return float(sum(confs) / len(confs))
+
+        # Grammar mode often omits confidence fields; use a conservative high
+        # fallback so keyword decisions rely on grammar + exact match policy.
+        return 0.90 if self.use_grammar else 0.0
+
+    def _match_keyword(self, text: str) -> Optional[str]:
+        """Match recognized text to configured keywords using strict mode by default."""
+        if not text:
+            return None
+
+        text_compact = ''.join(text.split())
+        for keyword in self.keywords:
+            kw_compact = ''.join(keyword.split())
+            if self.exact_match_only:
+                if text == keyword or text_compact == kw_compact:
+                    return keyword
+            else:
+                if keyword in text or kw_compact in text_compact:
+                    return keyword
+        return None
+
+    def _apply_detection_policy(self, detected_keyword: Optional[str], text: str, confidence: float) -> Optional[Dict]:
+        """Apply conservative detection policy to reduce false triggers."""
+        now = time.time()
+
+        # Cooldown after successful trigger.
+        if now - self._last_trigger_time < self.trigger_cooldown_s:
+            return None
+
+        # Confidence gate.
+        if detected_keyword is None or confidence < self.confidence_threshold:
+            self._candidate_keyword = None
+            self._candidate_hits = 0
+            return None
+
+        # Multi-hit confirmation within a short window.
+        if self._candidate_keyword == detected_keyword and (now - self._last_candidate_time) <= self.confirmation_window_s:
+            self._candidate_hits += 1
+        else:
+            self._candidate_keyword = detected_keyword
+            self._candidate_hits = 1
+
+        self._last_candidate_time = now
+
+        if self._candidate_hits < self.confirmation_hits:
+            return None
+
+        # Successful trigger.
+        self.total_detections += 1
+        self.keyword_counts[detected_keyword] += 1
+        self._last_trigger_time = now
+        self._candidate_keyword = None
+        self._candidate_hits = 0
+
+        logging.info(
+            "✅ Keyword detected: '%s' (confidence: %.2f, hits: %s)",
+            detected_keyword,
+            confidence,
+            self.confirmation_hits,
+        )
+
+        return {
+            'detected': True,
+            'keyword': detected_keyword,
+            'text': text,
+            'confidence': confidence
+        }
     
     def add_keyword(self, keyword: str):
         """

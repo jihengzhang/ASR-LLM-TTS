@@ -221,7 +221,8 @@ def main():
     else:
         list_available_models()
         print("\nWhich model would you like to download?")
-        print("Recommended for this project: cn-small (Chinese keywords)")
+        print("Recommended for this project: cn-large (best KWS accuracy)")
+        print("If resources are limited, use cn-small")
         model_key = input("\nEnter model key (or 'quit' to exit): ").strip().lower()
         
         if model_key == 'quit':
