@@ -28,6 +28,15 @@ except ImportError:
     NOISEREDUCE_AVAILABLE = False
     logging.warning("noisereduce not available. Noise reduction disabled.")
 
+try:
+    import torch
+    import torchaudio
+    from denoiser import pretrained
+    FACEBOOK_DENOISER_AVAILABLE = True
+except ImportError:
+    FACEBOOK_DENOISER_AVAILABLE = False
+    logging.warning("Facebook Denoiser not available. Will use noisereduce if available.")
+
 
 class AudioDenoiser:
     """
@@ -46,7 +55,8 @@ class AudioDenoiser:
         sample_rate: int = 16000,
         strength: str = 'medium',
         vad_mode: int = 2,
-        noise_window_duration: float = 0.5
+        noise_window_duration: float = 0.5,
+        denoiser_type: str = 'facebook'
     ):
         """
         Initialize AudioDenoiser
@@ -56,10 +66,12 @@ class AudioDenoiser:
             strength: Denoising strength - 'weak', 'medium', or 'strong'
             vad_mode: WebRTC VAD aggressiveness (0-3, higher = more aggressive)
             noise_window_duration: Duration of noise estimation window in seconds
+            denoiser_type: Type of denoiser - 'facebook' (deep learning, default) or 'noisereduce' (spectral gating)
         """
         self.sample_rate = sample_rate
         self.strength = strength
         self.vad_mode = vad_mode
+        self.denoiser_type = denoiser_type
         
         # Strength mapping to noisereduce prop_decrease parameter
         self.strength_map = {
@@ -95,7 +107,31 @@ class AudioDenoiser:
         self.speech_frame_count = 0
         self.silence_frame_count = 0
         
+        # Initialize Facebook Denoiser model if selected
+        self.facebook_model = None
+        self.device = None
+        if denoiser_type == 'facebook' and FACEBOOK_DENOISER_AVAILABLE:
+            try:
+                logging.info("Loading Facebook Denoiser model (DNS64)...")
+                self.facebook_model = pretrained.dns64()
+                self.facebook_model.eval()
+                
+                # Use GPU if available, otherwise CPU
+                self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+                self.facebook_model.to(self.device)
+                
+                logging.info(f"Facebook Denoiser loaded successfully on {self.device}")
+            except Exception as e:
+                logging.error(f"Failed to load Facebook Denoiser: {e}")
+                logging.info("Falling back to noisereduce")
+                self.denoiser_type = 'noisereduce'
+                self.facebook_model = None
+        elif denoiser_type == 'facebook' and not FACEBOOK_DENOISER_AVAILABLE:
+            logging.warning("Facebook Denoiser requested but not available. Using noisereduce instead.")
+            self.denoiser_type = 'noisereduce'
+        
         logging.info(f"AudioDenoiser initialized: "
+                    f"denoiser_type={self.denoiser_type}, "
                     f"strength={strength}, sample_rate={sample_rate}Hz")
     
     def set_strength(self, strength: str):
@@ -219,6 +255,49 @@ class AudioDenoiser:
         # Update noise buffer
         self.noise_buffer.extend(audio_frame)
         
+        # Use Facebook Denoiser if available and selected
+        if self.denoiser_type == 'facebook' and self.facebook_model is not None:
+            try:
+                # Convert numpy array to torch tensor
+                # Input shape: [samples] -> [batch=1, channels=1, samples]
+                audio_tensor = torch.from_numpy(audio_frame).float().unsqueeze(0).unsqueeze(0)
+                audio_tensor = audio_tensor.to(self.device)
+                
+                # Apply denoising with no gradient computation
+                with torch.no_grad():
+                    denoised_tensor = self.facebook_model(audio_tensor)
+                
+                # Convert back to numpy: [1, 1, samples] -> [samples]
+                denoised = denoised_tensor.squeeze().cpu().numpy()
+                
+                # Calculate output RMS
+                rms_after = self._calculate_rms(denoised)
+                stats['rms_after'] = rms_after
+                self.rms_after_history.append(rms_after)
+                
+                # Calculate noise reduction in dB
+                if rms_before > 1e-10:
+                    reduction_db = 20 * np.log10(rms_after / rms_before)
+                    stats['reduction_db'] = reduction_db
+                
+                stats['processed'] = True
+                
+                # Periodic logging
+                if self.frame_count % 100 == 0:
+                    logging.debug(f"Facebook Denoiser stats: frames={self.frame_count}, "
+                                f"speech={self.speech_frame_count}, "
+                                f"silence={self.silence_frame_count}, "
+                                f"avg_reduction={stats['reduction_db']:.1f}dB")
+                
+                return denoised, stats
+                
+            except Exception as e:
+                logging.error(f"Facebook Denoiser failed: {e}, falling back to original audio")
+                stats['rms_after'] = rms_before
+                self.rms_after_history.append(rms_before)
+                return audio_frame, stats
+        
+        # Fallback to noisereduce if Facebook Denoiser not available/selected
         try:
             # Apply noise reduction
             prop_decrease = self.strength_map[self.strength]
