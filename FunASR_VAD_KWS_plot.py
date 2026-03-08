@@ -771,13 +771,13 @@ class VADKWSProcessor:
 
         # Configure original audio waveform subplot
         self.ax1.set_title('Original Audio', pad=5)
-        self.ax1.set_ylim(-0.5, 0.5)
+        self.ax1.set_ylim(-0.3, 0.3)
         self.ax1.set_ylabel('Amplitude')
         self.ax1.grid(True)
 
         # Configure detected speech subplot
         self.ax2.set_title('Mean filtered audio and VAD Detection', pad=5)
-        self.ax2.set_ylim(-0.5, 0.5)
+        self.ax2.set_ylim(-0.3, 0.3)
         self.ax2.set_ylabel('Amplitude')
         self.ax2.grid(True)
 
@@ -834,6 +834,7 @@ class VADKWSProcessor:
             with self.lock:
                 audio_buffer_speech = list(self.audio_buffer_speechonly)
                 audio_buffer_original = list(self.audio_buffer_original)
+                audio_buffer_denoised = list(self.denoised_audio_buffer)  # v2.0: 获取降噪后音频数据
                 detected_keywords_copy = list(self.detected_keywords)
                 detected_vad_copy = list(self.detected_vad)
                 keyword_status_history_copy = list(self.keyword_status_history)
@@ -878,6 +879,27 @@ class VADKWSProcessor:
                 )
                 all_original_audio.extend(audio_chunk)
                 all_original_timestamps.extend(chunk_timestamps)
+            
+            # v2.0: 处理降噪后音频数据（将叠加显示在ax1）
+            all_denoised_audio = []
+            all_denoised_timestamps = []
+            
+            # Filter buffer data within display window for denoised audio
+            filtered_denoised = [
+                (chunk, ts) for chunk, ts in audio_buffer_denoised 
+                if ts is not None and ts + (len(chunk) / self.sample_rate) >= start_time
+            ]
+            
+            for audio_chunk, chunk_start_time in filtered_denoised:
+                # Generate timestamps for each sample in the chunk
+                chunk_duration = len(audio_chunk) / self.sample_rate
+                chunk_timestamps = np.linspace(
+                    chunk_start_time, 
+                    chunk_start_time + chunk_duration, 
+                    len(audio_chunk)
+                )
+                all_denoised_audio.extend(audio_chunk)
+                all_denoised_timestamps.extend(chunk_timestamps)
             
             # 处理语音段数据
             all_speech_audio = []
@@ -951,82 +973,43 @@ class VADKWSProcessor:
             def format_time(x, pos):
                 return datetime.fromtimestamp(x).strftime('%H:%M:%S.%f')[:-4]
             
-            # 更新原始音频子图 (ax1)
+            # v2.0: 更新原始音频子图 (ax1) - 只显示原始波形
             self.ax1.clear()
             self.ax1.set_title('Original Audio')
             
+            # 绘制原始音频（灰色）
             if all_original_timestamps:
                 original_samples = np.array(all_original_audio)
                 original_timestamps = np.array(all_original_timestamps)
-                self.ax1.plot(original_timestamps, original_samples, 'gray', linewidth=0.8)
-
-                # Plot speech level in ax1
-                # 安全过滤speech_level数据
-                filtered_speech_level = []
-                for level, ts in self.speech_level:
-                    if ts is None:
-                        print(f"警告: 检测到speech_level数据中有None时间戳，已跳过")
-                        continue
-                    if ts >= start_time:
-                        filtered_speech_level.append((level, ts))
-                
-                if filtered_speech_level:
-                    level_times = []
-                    level_values = []
-                    last_level = 0
-                    last_time = start_time
-                    
-                    # Add initial point
-                    level_times.append(start_time)
-                    level_values.append(0)
-                    
-                    for level, ts in filtered_speech_level:
-                        # Add point just before state change
-                        level_times.append(ts - 0.001)
-                        level_values.append(last_level)
-                        
-                        # Add point at new state
-                        level_times.append(ts)
-                        level_values.append(level)  # level is already 0 or 1
-                        
-                        last_level = level
-                        last_time = ts
-                    
-                    # Add final point
-                    level_times.append(current_time)
-                    level_values.append(last_level)
-                    
-                    # Plot speech level line in ax1
-                    self.ax1.plot(level_times, level_values, 'b-', 
-                                 linewidth=2.0, alpha=0.7, label='Speech Level')
+                self.ax1.plot(original_timestamps, original_samples, 'gray', 
+                             linewidth=0.8, alpha=0.8, label='Original')
             
-            self.ax1.legend(loc='upper left')
+            self.ax1.legend(loc='upper left', fontsize=9)
 
             self.ax1.set_xlim(start_time, current_time)
-            # self.ax1.set_xlim(time.time()-20, time.time())
-            self.ax1.set_ylim(-1.0, 1.0)
-            # 设置精确的y轴刻度间隔为0.1
-            yticks = np.arange(-1.0, 1.1, 0.5)
+            # v2.0: 修改Y轴范围为±0.3以显示更多细节
+            self.ax1.set_ylim(-0.3, 0.3)
+            # 设置精确的y轴刻度
+            yticks = np.arange(-0.3, 0.31, 0.1)
             self.ax1.set_yticks(yticks)
-            self.ax1.grid(True)
+            self.ax1.grid(True, alpha=0.3)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
-            # 更新语音检测子图 (ax2) - now showing VAD detection results
+            # v2.0: 更新语音检测子图 (ax2) - 显示降噪音频和VAD检测结果
             self.ax2.clear()
-            self.ax2.set_title('Mean filtered audio and VAD Detection')
+            self.ax2.set_title('Denoised Audio (蓝色) and VAD Detection (红色)')
             
-            # Plot original speech waveform as background
-            if all_speech_timestamps:
-                speech_samples = np.array(all_speech_audio)
-                speech_timestamps = np.array(all_speech_timestamps)
-                self.ax2.plot(speech_timestamps, speech_samples, 'gray', 
-                             linewidth=0.8, alpha=0.5, label='Audio')
+            # v2.0: 绘制降噪后音频（蓝色，背景）
+            if all_denoised_timestamps:
+                denoised_samples = np.array(all_denoised_audio)
+                denoised_timestamps = np.array(all_denoised_timestamps)
+                self.ax2.plot(denoised_timestamps, denoised_samples, 'b-', 
+                             linewidth=0.8, alpha=0.6, label='Denoised')
 
-            # Plot VAD detection results - 过滤掉任何None时间戳并添加调试日志
+            # Plot VAD detection results - 过滤掉任何None时间戳
             filtered_vad = []
             for vad_level, ts in detected_vad_copy:
                 if ts is None:
-                    print(f"警告: 检测到VAD数据中有None时间戳，已跳过")
                     continue
                 if ts >= start_time:
                     filtered_vad.append((vad_level, ts))
@@ -1060,21 +1043,15 @@ class VADKWSProcessor:
                 # Plot VAD line
                 self.ax2.plot(vad_times, vad_values, 'r-', 
                              linewidth=2.0, alpha=0.7, label='VAD')
-                
-                # Add colored background for speech periods
-                # for i in range(len(vad_times)-1):
-                #     if vad_values[i] > 0.1:  # If VAD is active
-                #         self.ax2.axvspan(vad_times[i], vad_times[i+1], 
-                #                        color='green', alpha=0.2)
 
-            self.ax2.legend(loc='upper left')
+            self.ax2.legend(loc='upper left', fontsize=9)
             self.ax2.set_xlim(start_time, current_time)
-            # self.ax2.set_xlim(time.time()-20, time.time())
-            self.ax2.set_ylim(-1.0, 1.0)
-            # 设置精确的y轴刻度间隔为0.1
-            yticks = np.arange(-1.0, 1.1, 0.5)
+            # v2.0: 修改Y轴范围为±0.3以显示更多细节
+            self.ax2.set_ylim(-0.3, 0.3)
+            # 设置精确的y轴刻度
+            yticks = np.arange(-0.3, 0.31, 0.1)
             self.ax2.set_yticks(yticks)
-            self.ax2.grid(True)
+            self.ax2.grid(True, alpha=0.3)
             self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
 
             # 更新关键词显示子图 (ax3) - now includes keyword status history
