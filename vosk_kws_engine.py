@@ -201,6 +201,19 @@ class VoskKWSEngine:
                 partial_json = self.recognizer.PartialResult()
                 partial = json.loads(partial_json)
                 partial_text = partial.get('partial', '').strip().lower()
+
+                # Optional low-latency path: allow wake-word trigger on partial text.
+                # Confidence is not provided by partial result, so use threshold value.
+                partial_keyword = self._match_keyword(partial_text)
+                if partial_keyword is not None:
+                    detection = self._apply_detection_policy(
+                        partial_keyword,
+                        partial_text,
+                        max(self.confidence_threshold, 0.8),
+                    )
+                    if detection is not None:
+                        detection['partial'] = partial_text
+                        return detection
                 
                 return {
                     'detected': False,

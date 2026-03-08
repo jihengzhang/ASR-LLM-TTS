@@ -42,7 +42,7 @@ class AudioTestFrame(wx.Frame):
         # Then initialize processor (moved down to avoid backend conflicts)
         self.processor = VADKWSProcessor(
             sample_rate=16000,
-            chunk_size=8000,
+            chunk_size=1600,
             threshold=0.01,  # Lower threshold for better speech start detection
             channels=1,
             silence_duration=0.3,
@@ -51,7 +51,7 @@ class AudioTestFrame(wx.Frame):
             keywords=["你好", "小爱", "小度", "开始", "hello", "hi panda", "hi siri"],
             stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"],
             pause_threshold=0.3,  # 0.3s pause to detect speech end (faster response for streaming)
-            force_denoise_all_frames=True  # Default: always denoise all frames
+            force_denoise_all_frames=False  # Low-latency default: avoid denoising every frame
         )
         self.processor_started = False
         self.processor.isDebug = False
@@ -164,7 +164,7 @@ class AudioTestFrame(wx.Frame):
         
         # Checkbox for force denoise mode
         self.force_denoise_checkbox = wx.CheckBox(self.panel, label="Force Denoise All Frames (强制所有帧降噪)")
-        self.force_denoise_checkbox.SetValue(True)  # Default to True (always denoise)
+        self.force_denoise_checkbox.SetValue(False)  # Low-latency default
         self.force_denoise_checkbox.Bind(wx.EVT_CHECKBOX, self.on_force_denoise_changed)
         
         # Hint text

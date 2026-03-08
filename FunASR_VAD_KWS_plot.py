@@ -225,8 +225,9 @@ class VADKWSProcessor:
                 if vosk_model_path is None:
                     vosk_models_dir = os.path.join(os.path.dirname(__file__), 'models', 'vosk_models')
                     preferred_paths = [
-                        os.path.join(vosk_models_dir, 'vosk-model-cn-0.22'),
-                        os.path.join(vosk_models_dir, 'vosk-model-small-cn-0.22')
+                        # Prefer small model for lower wake-word latency.
+                        os.path.join(vosk_models_dir, 'vosk-model-small-cn-0.22'),
+                        os.path.join(vosk_models_dir, 'vosk-model-cn-0.22')
                     ]
                     vosk_model_path = None
                     for candidate in preferred_paths:
@@ -757,12 +758,23 @@ class VADKWSProcessor:
             audio_denoised = audio_data_norm
             if self.audio_denoiser is not None:
                 try:
-                    # Use force_denoise_all_frames to control skip_vad behavior
-                    # skip_vad=True: denoise all frames (speech + silence)
-                    # skip_vad=False: only denoise when VAD detects speech
-                    audio_denoised, denoise_stats = self.audio_denoiser.denoise_frame(
-                        audio_data_norm, skip_vad=self.force_denoise_all_frames
-                    )
+                    # Low-latency path: during SLEEPING wake-word monitoring, bypass heavy denoiser.
+                    # This keeps callback cost low so Vosk can react faster.
+                    skip_denoiser_now = False
+                    with self.lock:
+                        if self.state == 'SLEEPING' and self.vosk_kws is not None:
+                            skip_denoiser_now = True
+
+                    if skip_denoiser_now:
+                        audio_denoised = audio_data_norm
+                        denoise_stats = {'is_speech': False}
+                    else:
+                        # Use force_denoise_all_frames to control skip_vad behavior
+                        # skip_vad=True: denoise all frames (speech + silence)
+                        # skip_vad=False: only denoise when VAD detects speech
+                        audio_denoised, denoise_stats = self.audio_denoiser.denoise_frame(
+                            audio_data_norm, skip_vad=self.force_denoise_all_frames
+                        )
                     # Save denoised audio to buffer
                     with self.lock:
                         self.denoised_audio_buffer.append((audio_denoised, frame_end_time))
@@ -1309,7 +1321,7 @@ def kws_processing_thread(self):
         try:
             # Get audio data from queue
             try:
-                audio_data, timestamp = self.audio_data_queue.get(timeout=0.1)
+                audio_data, timestamp = self.audio_data_queue.get(timeout=0.02)
                 if self.isDebug:
                     print(f"DEBUG: Got audio chunk at {timestamp}, length={len(audio_data)}")
             except queue.Empty:
@@ -1322,7 +1334,8 @@ def kws_processing_thread(self):
             if current_state == 'SLEEPING' and self.vosk_kws is not None:
                 # In SLEEPING state: only run Vosk for wake word detection
                 try:
-                    result = self.vosk_kws.detect_keyword(audio_data, return_partial=False)
+                    # Use partial path for earlier wake-word trigger.
+                    result = self.vosk_kws.detect_keyword(audio_data, return_partial=True)
                     if result['detected']:
                         # Wake word detected! Switch to AWAKE state
                         with self.lock:
