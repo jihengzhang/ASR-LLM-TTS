@@ -19,7 +19,25 @@ try:
     WEBRTCVAD_AVAILABLE = True
 except ImportError:
     WEBRTCVAD_AVAILABLE = False
-    logging.warning("webrtcvad not available. VAD pre-filtering disabled.")
+    logging.warning("webrtcvad not available. Will try Silero VAD.")
+
+try:
+    import torch
+    # Try to load Silero VAD model
+    silero_model, silero_utils = torch.hub.load(
+        repo_or_dir='snakers4/silero-vad',
+        model='silero_vad',
+        force_reload=False,
+        onnx=False,
+        verbose=False
+    )
+    SILERO_VAD_AVAILABLE = True
+    logging.info("Silero VAD loaded successfully (PyTorch-based, high accuracy)")
+except Exception as e:
+    SILERO_VAD_AVAILABLE = False
+    silero_model = None
+    silero_utils = None
+    logging.warning(f"Silero VAD not available: {e}")
 
 try:
     import noisereduce as nr
@@ -56,7 +74,8 @@ class AudioDenoiser:
         strength: str = 'medium',
         vad_mode: int = 2,
         noise_window_duration: float = 0.5,
-        denoiser_type: str = 'facebook'
+        denoiser_type: str = 'facebook',
+        vad_type: str = 'auto'
     ):
         """
         Initialize AudioDenoiser
@@ -64,14 +83,16 @@ class AudioDenoiser:
         Args:
             sample_rate: Audio sample rate in Hz (default: 16000)
             strength: Denoising strength - 'weak', 'medium', or 'strong'
-            vad_mode: WebRTC VAD aggressiveness (0-3, higher = more aggressive)
+            vad_mode: WebRTC VAD aggressiveness (0-3, higher = more aggressive) or Silero threshold (0.0-1.0)
             noise_window_duration: Duration of noise estimation window in seconds
             denoiser_type: Type of denoiser - 'facebook' (deep learning, default) or 'noisereduce' (spectral gating)
+            vad_type: Type of VAD - 'auto' (prefer Silero > webrtc), 'silero', 'webrtc', or 'none'
         """
         self.sample_rate = sample_rate
         self.strength = strength
         self.vad_mode = vad_mode
         self.denoiser_type = denoiser_type
+        self.vad_type = vad_type
         
         # Strength mapping to noisereduce prop_decrease parameter
         self.strength_map = {
@@ -84,15 +105,40 @@ class AudioDenoiser:
             logging.warning(f"Invalid strength '{strength}', using 'medium'")
             self.strength = 'medium'
         
-        # Initialize WebRTC VAD
+        # Initialize VAD (prefer Silero > WebRTC)
         self.vad = None
-        if WEBRTCVAD_AVAILABLE:
+        self.silero_vad = None
+        self.silero_threshold = 0.5  # Default threshold for speech detection
+        self.vad_active_type = 'none'  # Track which VAD is actually used
+        
+        if vad_type == 'auto':
+            # Auto mode: prefer Silero, fallback to WebRTC
+            if SILERO_VAD_AVAILABLE:
+                self.silero_vad = silero_model
+                self.vad_active_type = 'silero'
+                self.silero_threshold = vad_mode if vad_mode <= 1.0 else 0.5
+                logging.info(f"Silero VAD initialized (threshold={self.silero_threshold:.2f})")
+            elif WEBRTCVAD_AVAILABLE:
+                try:
+                    self.vad = webrtcvad.Vad(int(vad_mode) if vad_mode > 1 else 2)
+                    self.vad_active_type = 'webrtc'
+                    logging.info(f"WebRTC VAD initialized (mode={int(vad_mode)})")
+                except Exception as e:
+                    logging.error(f"Failed to initialize WebRTC VAD: {e}")
+        elif vad_type == 'silero' and SILERO_VAD_AVAILABLE:
+            self.silero_vad = silero_model
+            self.vad_active_type = 'silero'
+            self.silero_threshold = vad_mode if vad_mode <= 1.0 else 0.5
+            logging.info(f"Silero VAD initialized (threshold={self.silero_threshold:.2f})")
+        elif vad_type == 'webrtc' and WEBRTCVAD_AVAILABLE:
             try:
-                self.vad = webrtcvad.Vad(vad_mode)
-                logging.info(f"WebRTC VAD initialized (mode={vad_mode})")
+                self.vad = webrtcvad.Vad(int(vad_mode) if vad_mode > 1 else 2)
+                self.vad_active_type = 'webrtc'
+                logging.info(f"WebRTC VAD initialized (mode={int(vad_mode)})")
             except Exception as e:
                 logging.error(f"Failed to initialize WebRTC VAD: {e}")
-                self.vad = None
+        elif vad_type != 'none':
+            logging.warning(f"Requested VAD type '{vad_type}' not available")
         
         # Noise estimation buffer (sliding window)
         noise_window_samples = int(noise_window_duration * sample_rate)
@@ -132,6 +178,7 @@ class AudioDenoiser:
         
         logging.info(f"AudioDenoiser initialized: "
                     f"denoiser_type={self.denoiser_type}, "
+                    f"vad_type={self.vad_active_type}, "
                     f"strength={strength}, sample_rate={sample_rate}Hz")
     
     def set_strength(self, strength: str):
@@ -149,7 +196,7 @@ class AudioDenoiser:
     
     def _is_speech(self, audio_frame: np.ndarray) -> bool:
         """
-        Check if audio frame contains speech using WebRTC VAD
+        Check if audio frame contains speech using Silero VAD or WebRTC VAD
         
         Args:
             audio_frame: Audio data as float32 array [-1, 1]
@@ -157,32 +204,64 @@ class AudioDenoiser:
         Returns:
             True if speech detected, False otherwise
         """
-        if self.vad is None:
-            # No VAD available, assume all frames contain speech
+        # No VAD available, assume all frames contain speech
+        if self.vad_active_type == 'none':
             return True
         
-        try:
-            # Convert float32 [-1, 1] to int16
-            audio_int16 = (audio_frame * 32768.0).astype(np.int16)
-            audio_bytes = audio_int16.tobytes()
-            
-            # WebRTC VAD requires frame size of 10, 20, or 30ms
-            # For 16kHz: 160, 320, or 480 samples
-            frame_duration_ms = len(audio_frame) * 1000 // self.sample_rate
-            
-            # Adjust to nearest valid duration
-            if frame_duration_ms < 15:
-                frame_duration_ms = 10
-            elif frame_duration_ms < 25:
-                frame_duration_ms = 20
-            else:
-                frame_duration_ms = 30
-            
-            return self.vad.is_speech(audio_bytes, self.sample_rate)
+        # Silero VAD (preferred)
+        if self.vad_active_type == 'silero' and self.silero_vad is not None:
+            try:
+                # Silero VAD requires exactly 512 samples for 16kHz (32ms)
+                required_samples = 512 if self.sample_rate == 16000 else 256
+                
+                # Pad or truncate to required size
+                if len(audio_frame) < required_samples:
+                    audio_padded = np.pad(audio_frame, (0, required_samples - len(audio_frame)))
+                elif len(audio_frame) > required_samples:
+                    audio_padded = audio_frame[:required_samples]
+                else:
+                    audio_padded = audio_frame
+                
+                # Convert to tensor
+                audio_tensor = torch.from_numpy(audio_padded).float()
+                
+                # Get speech probability
+                with torch.no_grad():
+                    speech_prob = self.silero_vad(audio_tensor, self.sample_rate).item()
+                
+                return speech_prob > self.silero_threshold
+                
+            except Exception as e:
+                logging.debug(f"Silero VAD error: {e}")
+                return True  # Assume speech on error
         
-        except Exception as e:
-            logging.debug(f"VAD error: {e}")
-            return True  # Assume speech on error
+        # WebRTC VAD (fallback)
+        if self.vad_active_type == 'webrtc' and self.vad is not None:
+            try:
+                # Convert float32 [-1, 1] to int16
+                audio_int16 = (audio_frame * 32768.0).astype(np.int16)
+                audio_bytes = audio_int16.tobytes()
+                
+                # WebRTC VAD requires frame size of 10, 20, or 30ms
+                # For 16kHz: 160, 320, or 480 samples
+                frame_duration_ms = len(audio_frame) * 1000 // self.sample_rate
+                
+                # Adjust to nearest valid duration
+                if frame_duration_ms < 15:
+                    frame_duration_ms = 10
+                elif frame_duration_ms < 25:
+                    frame_duration_ms = 20
+                else:
+                    frame_duration_ms = 30
+                
+                return self.vad.is_speech(audio_bytes, self.sample_rate)
+            
+            except Exception as e:
+                logging.debug(f"WebRTC VAD error: {e}")
+                return True  # Assume speech on error
+        
+        # No VAD matched, assume speech
+        return True
     
     def _calculate_rms(self, audio: np.ndarray) -> float:
         """

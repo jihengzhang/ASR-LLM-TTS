@@ -51,10 +51,17 @@ certifi==2025.7.14
 # Audio Enhancement and Lightweight KWS
 
 # Noise Reduction
-noisereduce>=3.0.0          # Audio denoising using spectral gating
+noisereduce>=3.0.0          # Audio denoising using spectral gating (traditional)
+denoiser>=0.1.5             # Facebook Denoiser: Deep learning based speech enhancement (DNS64 model)
 
 # Enhanced VAD
-webrtcvad>=2.0.10           # WebRTC Voice Activity Detection
+# [AUTO-LOADED] silero-vad - Automatically loaded via torch.hub, no pip installation required
+#               Repository: snakers4/silero-vad
+#               Model size: ~1.5MB, downloaded on first use
+#               Input: 512 samples @ 16kHz, Output: probability 0.0-1.0
+#               Implementation: audio_denoiser.py lines 23-33
+# webrtcvad>=2.0.10         # [OPTIONAL] WebRTC VAD (requires C compiler, difficult on Windows)
+#                           # Silero VAD is used as default replacement (PyTorch-based, better accuracy)
 
 # Lightweight Keyword Spotting
 vosk>=0.3.45                # Offline speech recognition for wake word detection

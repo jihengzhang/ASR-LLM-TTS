@@ -103,7 +103,8 @@ class VADKWSProcessor:
                  buffer_duration=3.0, keywords=None, stopwords="stop", time_to_end_conversation=10,
                  enable_denoiser=True, denoise_strength='medium',
                  enable_vosk_kws=True, vosk_model_path=None,
-                 enable_speaker_recog=False, pause_threshold=1.0):
+                 enable_speaker_recog=False, pause_threshold=1.0,
+                 force_denoise_all_frames=True):
         """
         Initialize the processor
         
@@ -117,6 +118,7 @@ class VADKWSProcessor:
             vad_interval: VAD check interval in seconds (default: 0.25s)
             buffer_duration: Pre-buffer duration in seconds (default: 3.0s)
             keywords: List of keywords to detect (default: None)
+            force_denoise_all_frames: If True, denoise all frames; if False, only denoise when VAD detects speech (default: True)
         """
         # Recording support variables
         self.audio_frame_callback = None
@@ -200,6 +202,7 @@ class VADKWSProcessor:
         self.pause_threshold = pause_threshold  # Adjustable pause detection threshold
         
         # v2.0: Audio denoiser
+        self.force_denoise_all_frames = force_denoise_all_frames  # Control whether to denoise all frames or only speech
         self.audio_denoiser = None
         self.denoised_audio_buffer = collections.deque(maxlen=25 * sample_rate)  # 降噪后音频
         if enable_denoiser and DENOISER_AVAILABLE:
@@ -304,6 +307,17 @@ class VADKWSProcessor:
             print(f"Denoising strength changed to: {strength}")
         else:
             print("Warning: Denoiser not available")
+    
+    def set_force_denoise_all_frames(self, force_denoise: bool):
+        """
+        Set whether to force denoise all frames or only when VAD detects speech
+        
+        Args:
+            force_denoise: If True, denoise all frames; if False, only denoise speech frames
+        """
+        self.force_denoise_all_frames = force_denoise
+        mode = "all frames (speech + silence)" if force_denoise else "speech frames only (VAD-based)"
+        print(f"Force denoise mode changed to: {mode}")
     
     def set_pause_threshold(self, threshold_seconds: float):
         """
@@ -711,8 +725,11 @@ class VADKWSProcessor:
             audio_denoised = audio_data_norm
             if self.audio_denoiser is not None:
                 try:
+                    # Use force_denoise_all_frames to control skip_vad behavior
+                    # skip_vad=True: denoise all frames (speech + silence)
+                    # skip_vad=False: only denoise when VAD detects speech
                     audio_denoised, denoise_stats = self.audio_denoiser.denoise_frame(
-                        audio_data_norm, skip_vad=False
+                        audio_data_norm, skip_vad=self.force_denoise_all_frames
                     )
                     # Save denoised audio to buffer
                     with self.lock:
@@ -771,13 +788,13 @@ class VADKWSProcessor:
 
         # Configure original audio waveform subplot
         self.ax1.set_title('Original Audio', pad=5)
-        self.ax1.set_ylim(-0.3, 0.3)
+        self.ax1.set_ylim(-0.2, 0.2)
         self.ax1.set_ylabel('Amplitude')
         self.ax1.grid(True)
 
         # Configure detected speech subplot
         self.ax2.set_title('Mean filtered audio and VAD Detection', pad=5)
-        self.ax2.set_ylim(-0.3, 0.3)
+        self.ax2.set_ylim(-0.2, 0.2)
         self.ax2.set_ylabel('Amplitude')
         self.ax2.grid(True)
 
@@ -987,10 +1004,10 @@ class VADKWSProcessor:
             self.ax1.legend(loc='upper left', fontsize=9)
 
             self.ax1.set_xlim(start_time, current_time)
-            # v2.0: 修改Y轴范围为±0.3以显示更多细节
-            self.ax1.set_ylim(-0.3, 0.3)
+            # v2.0: 修改Y轴范围为±0.2以显示更多细节
+            self.ax1.set_ylim(-0.2, 0.2)
             # 设置精确的y轴刻度
-            yticks = np.arange(-0.3, 0.31, 0.1)
+            yticks = np.arange(-0.2, 0.21, 0.1)
             self.ax1.set_yticks(yticks)
             self.ax1.grid(True, alpha=0.3)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
@@ -1046,10 +1063,10 @@ class VADKWSProcessor:
 
             self.ax2.legend(loc='upper left', fontsize=9)
             self.ax2.set_xlim(start_time, current_time)
-            # v2.0: 修改Y轴范围为±0.3以显示更多细节
-            self.ax2.set_ylim(-0.3, 0.3)
+            # v2.0: 修改Y轴范围为±0.2以显示更多细节
+            self.ax2.set_ylim(-0.2, 0.2)
             # 设置精确的y轴刻度
-            yticks = np.arange(-0.3, 0.31, 0.1)
+            yticks = np.arange(-0.2, 0.21, 0.1)
             self.ax2.set_yticks(yticks)
             self.ax2.grid(True, alpha=0.3)
             self.ax2.xaxis.set_major_formatter(plt.FuncFormatter(format_time))

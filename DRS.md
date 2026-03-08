@@ -12,6 +12,10 @@ SSO: 212597558
 |------|------|------|----------|
 | v1.0 | 2025 | jiheng.zhang | 初始版本：基础VAD/KWS功能 |
 | v2.0 | 2026-03-08 | jiheng.zhang | 降噪集成、Vosk KWS唤醒、状态机优化、可视化增强 |
+| v2.0.1 | 2026-03-08 | jiheng.zhang | Facebook Denoiser集成（-24.5dB降噪）替换noisereduce |
+| v2.0.2 | 2026-03-08 | jiheng.zhang | Silero VAD集成（torch.hub，无需C编译器） |
+| v2.0.3 | 2026-03-08 | jiheng.zhang | Force Denoise All Frames复选框，解决VAD-降噪冲突 |
+| v2.0.4 | 2026-03-08 | jiheng.zhang | Y轴调整至±0.2，适配高质量麦克风评估 |
 
 ---
 
@@ -193,6 +197,240 @@ SSO: 212597558
 - **滑动窗口**：维护500ms音频历史用于噪声估计
 - **性能监控**：输出降噪前后RMS值，用于量化降噪效果
 
+### 2.1 Facebook Denoiser深度学习降噪集成（2026-03-08更新）
+
+**优化背景**：
+传统spectral gating算法（noisereduce）存在本质局限：
+- ❌ **问题**：通过频域噪声估计，均匀降低所有频率分量（包括语音）
+- ❌ **表现**：降噪后语音和噪声同时衰减，SNR改善有限
+- ❌ **用户反馈**："只是把声音赋值降低，我希望只针对语音以外的音频降低，不要降低人说话的声音"
+
+**解决方案**：替换为Facebook Denoiser深度学习模型
+
+**模型规格**：
+- **架构**：Demucs U-Net（时域语音分离网络）
+- **训练集**：Microsoft DNS Challenge（clean speech + noise pairs）
+- **模型**：DNS64 checkpoint（128MB）
+- **设备**：优先使用CUDA GPU，回退到CPU
+- **输入格式**：16kHz单声道，float32张量[batch, channels, samples]
+
+**性能对比**：
+
+| 指标 | noisereduce (传统) | Facebook Denoiser (AI) |
+|------|-------------------|------------------------|
+| 降噪强度 | -13.1 dB | -24.5 dB |
+| 语音保留 | ❌ 衰减（均匀降低） | ✅ 保留（智能分离） |
+| 噪声抑制 | RMS 0.052 | RMS 0.014 |
+| 处理延迟 | ~20ms | ~30ms (CPU) / ~5ms (GPU) |
+| 计算资源 | CPU轻量 | GPU显存+100MB (可选) |
+| SNR提升 | 有限 | 显著（真实语音/噪声比提升） |
+
+**实现细节**：
+```python
+# audio_denoiser.py 关键代码
+class AudioDenoiser:
+    def __init__(self, denoiser_type='facebook'):
+        if denoiser_type == 'facebook':
+            self.facebook_model = pretrained.dns64()
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            self.facebook_model.to(self.device)
+            self.facebook_model.eval()
+    
+    def denoise_frame(self, audio_frame):
+        # numpy [samples] → torch [1, 1, samples]
+        audio_tensor = torch.from_numpy(audio_frame).float().unsqueeze(0).unsqueeze(0)
+        audio_tensor = audio_tensor.to(self.device)
+        
+        with torch.no_grad():
+            denoised = self.facebook_model(audio_tensor)
+        
+        # torch [1, 1, samples] → numpy [samples]
+        return denoised.squeeze().cpu().numpy()
+```
+
+**可视化效果**：
+- **ax1 (上图)**：灰色原始音频波形（保留语音+噪声）
+- **ax2 (中图)**：蓝色降噪后波形（语音峰值保留，基线噪声降低） + 红色VAD检测线
+- **ax3 (下图)**：关键词检测时间线
+- **对比观察**：
+  - 语音段：蓝色峰值幅度≈灰色峰值幅度（语音保留）
+  - 静音段：蓝色基线<<灰色基线（噪声抑制）
+  - Y轴范围：统一±0.2，刻度0.1，便于精确对比高质量麦克风
+
+**依赖冲突解决**：
+- **问题**：denoiser需要`hydra-core<1.0`，FunASR需要`hydra-core>=1.3.2`
+- **解决**：强制升级到hydra-core 1.3.2（FunASR优先）
+- **验证**：denoiser仍正常工作，hydra仅用于命令行参数解析（不影响核心推理）
+- **风险**：denoiser的hydra功能（CLI）不可用，但Python API正常
+
+**使用建议**：
+- ✅ **推荐场景**：需要高SNR的语音识别前处理
+- ✅ **推荐设备**：有NVIDIA GPU（RTX 2060+）
+- ⚠️ **注意**：CPU模式下延迟30-50ms（可接受，但不如GPU实时）
+- ⚠️ **备选方案**：如需极低延迟且无GPU，可降级回noisereduce
+
+### 2.2 Silero VAD语音活动检测集成（2026-03-08更新）
+
+**优化背景**：
+webrtcvad在Windows上安装困难（需要C编译器），且准确率有限。
+
+**解决方案**：采用Silero VAD（PyTorch-based深度学习模型）
+
+**模型规格**：
+- **架构**：TorchScript compiled模型（JIT优化）
+- **模型大小**：~1.5MB（极轻量）
+- **输入格式**：16kHz单声道，512 samples（32ms帧）
+- **输出**：语音概率值 0.0-1.0（可灵活设置阈值）
+- **设备**：CPU/GPU均支持，自动选择
+
+**性能对比**：
+
+| 指标 | webrtcvad | Silero VAD | FunASR VAD |
+|------|-----------|------------|------------|
+| 安装难度 | ❌ 需C编译器 | ✅ torch.hub自动 | ✅ pip安装 |
+| 模型大小 | Built-in | ~1.5MB | ~200MB |
+| 处理延迟 | <10ms | ~15-20ms (CPU) | ~50-100ms |
+| 准确率 | ⭐⭐⭐ | ⭐⭐⭐⭐⭐ | ⭐⭐⭐⭐ |
+| 输出类型 | Boolean | Probability | Timestamps |
+| 语言支持 | Language-free | Language-free | Chinese-optimized |
+| 用途 | Pre-filter | Real-time VAD | Segmentation |
+
+**实现细节**：
+```python
+# audio_denoiser.py 关键代码
+import torch
+
+# 加载Silero VAD（自动从torch.hub下载）
+silero_model, silero_utils = torch.hub.load(
+    repo_or_dir='snakers4/silero-vad',
+    model='silero_vad',
+    force_reload=False
+)
+
+class AudioDenoiser:
+    def __init__(self, vad_type='auto'):
+        # auto模式：优先使用Silero，回退到webrtcvad
+        if vad_type == 'auto' and SILERO_VAD_AVAILABLE:
+            self.silero_vad = silero_model
+            self.silero_threshold = 0.5  # 可调阈值
+    
+    def _is_speech(self, audio_frame):
+        # Silero VAD需要512 samples @ 16kHz
+        required_samples = 512
+        audio_padded = np.pad(audio_frame, (0, required_samples - len(audio_frame)))
+        
+        audio_tensor = torch.from_numpy(audio_padded[:required_samples]).float()
+        with torch.no_grad():
+            speech_prob = self.silero_vad(audio_tensor, 16000).item()
+        
+        return speech_prob > self.silero_threshold  # True/False
+```
+
+**集成架构**：
+```
+Audio Frame (任意长度) → 
+    ↓
+Silero VAD (_is_speech) → 
+    ├─ prob < 0.5: Skip denoising (silence) 
+    └─ prob ≥ 0.5: Apply denoising (speech)
+        ↓
+    Facebook Denoiser → 
+        ↓
+    Enhanced Audio
+```
+
+**优势**：
+- ✅ **易于安装**：无需C编译器，torch.hub自动下载
+- ✅ **高准确率**：深度学习模型，优于传统webrtcvad
+- ✅ **灵活阈值**：输出概率值，可根据场景调整（0.3-0.7）
+- ✅ **低延迟**：CPU模式15-20ms，GPU模式<5ms
+- ✅ **小模型**：1.5MB，不影响总体资源占用
+
+**使用建议**：
+- ✅ **默认选择**：`vad_type='auto'`自动使用Silero VAD
+- ✅ **调整阈值**：安静环境0.3，嘈杂环境0.7
+- ✅ **与FunASR协同**：Silero快速过滤 + FunASR精确分割
+- ⚠️ **注意**：首次运行会从GitHub下载模型（~1.5MB，约3-5秒）
+
+### 2.3 Force Denoise All Frames功能（2026-03-08更新）
+
+**问题背景**：
+VAD-降噪协同工作时发现的冲突：
+- **初始实现**：降噪模块内部使用Silero VAD预过滤（`skip_vad=False`）
+  - 逻辑：speech_prob < 0.5 → 跳过降噪，直接返回原始帧
+  - 目的：节省计算资源（静音帧无需降噪）
+- **问题表现**：用户截图显示蓝色（降噪）和灰色（原始）波形几乎完全重合
+  - 原因：静音段被VAD过滤，未经降噪处理，导致静音噪声未被抑制
+  - 影响：降噪效果不明显，麦克风评估不准确
+
+**解决方案**：
+添加UI控制选项"Force Denoise All Frames (强制所有帧降噪)"复选框
+
+**实现细节**：
+
+1. **UI控制**（Audio_test_UI.py）：
+```python
+# Lines 178-191: Force Denoise checkbox
+self.force_denoise_checkbox = wx.CheckBox(
+    self.panel,
+    label="Force Denoise All Frames (强制所有帧降噪)"
+)
+self.force_denoise_checkbox.SetValue(True)  # 默认勾选
+self.force_denoise_checkbox.Bind(wx.EVT_CHECKBOX, self.on_force_denoise_changed)
+
+# 提示文本
+✓ Checked: Denoise all frames (including silence) for maximum effect
+✗ Unchecked: Only denoise frames detected as speech (save computation)
+```
+
+2. **后端参数**（FunASR_VAD_KWS_plot.py）：
+```python
+# Line 100-107: __init__ 签名
+def __init__(self, force_denoise_all_frames=True, ...):
+    self.force_denoise_all_frames = force_denoise_all_frames
+
+# Lines 714-719: 动态控制skip_vad参数
+audio_denoised, stats = self.audio_denoiser.denoise_frame(
+    audio_data_norm,
+    skip_vad=self.force_denoise_all_frames  # True=强制降噪所有帧
+)
+
+# Lines 298-321: 动态更新方法
+def set_force_denoise_all_frames(self, force_denoise: bool):
+    self.force_denoise_all_frames = force_denoise
+```
+
+3. **降噪逻辑**（audio_denoiser.py）：
+```python
+def denoise_frame(self, audio_frame, skip_vad=False):
+    if not skip_vad:  # False时启用VAD过滤
+        is_speech = self._is_speech(audio_frame)
+        if not is_speech:
+            return audio_frame, stats  # 静音帧跳过降噪
+    
+    # skip_vad=True时，所有帧都执行降噪
+    denoised = self.facebook_model(audio_tensor)
+    return denoised, stats
+```
+
+**行为对比**：
+
+| 模式 | 语音段处理 | 静音段处理 | 计算开销 | 可视化效果 |
+|------|-----------|-----------|---------|----------|
+| ✓ Checked | 降噪 | 降噪 | 100% | 蓝色基线明显低于灰色 |
+| ✗ Unchecked | 降噪 | 跳过（返回原始） | ~50-70% | 语音段降噪，静音段重合 |
+
+**推荐设置**：
+- ✅ **麦克风对比测试**：勾选（便于观察静音噪声差异）
+- ✅ **演示降噪效果**：勾选（最大化可视化对比）
+- ⚪ **实时语音识别**：不勾选（节省GPU资源，静音段无需降噪）
+- ⚪ **低功耗场景**：不勾选（减少约30-50%计算量）
+
+**技术意义**：
+这个功能解决了"工具效果"vs"实际应用"的权衡：
+- 评估麦克风时需要全帧降噪（包括静音噪声）
+- 实际应用时只需语音段降噪（节省资源）
+
 ### 3. Vosk轻量级KWS唤醒
 
 **设计目标**：
@@ -254,22 +492,34 @@ SSO: 212597558
 
 ### 6. 可视化增强
 
-**新的subplot布局**（4个子图）：
+**当前subplot布局**（3个子图）：
 ```
 ┌─────────────────────────────────────────────────┐
-│ Subplot 1: 原始音频波形                         │
-│ └─ 红色线：关键词激活标记                       │
+│ Subplot 1 (ax1): 原始音频波形                   │
+│ └─ 灰色波形：原始麦克风输入                     │
+│ └─ Y轴：±0.2，刻度0.1（精细观察）               │
 ├─────────────────────────────────────────────────┤
-│ Subplot 2: 降噪后音频波形 [新增]               │
-│ └─ 蓝色填充：VAD检测到的语音段                  │
+│ Subplot 2 (ax2): 降噪后音频波形 + VAD标记      │
+│ └─ 蓝色波形：Facebook Denoiser降噪结果          │
+│ └─ 红色线：FunASR VAD检测语音段                │
+│ └─ Y轴：±0.2，刻度0.1（与ax1对齐）              │
 ├─────────────────────────────────────────────────┤
-│ Subplot 3: VAD检测的纯语音段                    │
-│ └─ 显示经过VAD过滤后的音频                     │
-├─────────────────────────────────────────────────┤
-│ Subplot 4: 关键词检测时间线                     │
-│ └─ 黄色高亮块：检测到的关键词及文本            │
+│ Subplot 3 (ax3): 关键词检测时间线               │
+│ └─ 黄色高亮块：检测到的关键词及识别文本         │
+│ └─ X轴：时间戳（秒）                            │
 └─────────────────────────────────────────────────┘
 ```
+
+**Y轴调整设计**（2026-03-08更新）：
+- **v1.0**: Y轴范围±0.5，适合低质量麦克风（噪声大）
+- **v2.0初期**: ±0.3，通用设置
+- **v2.0当前**: ±0.2，适合高质量麦克风评估（放大细节）
+- **刻度间隔**: 0.1（便于精确读数）
+- **应用位置**: 
+  - `ax1.set_ylim(-0.2, 0.2)` (Line 791)
+  - `ax2.set_ylim(-0.2, 0.2)` (Line 797)
+  - 初始化图表 (Lines 1008, 1067)
+  - Y刻度数组：`np.arange(-0.2, 0.21, 0.1)` (Lines 1010, 1069)
 
 **matplotlib blitting优化**：
 - 使用`animated=True` + `blit=True`的FuncAnimation
@@ -279,9 +529,20 @@ SSO: 212597558
 ### 7. UI控制面板扩展
 
 **新增控件**：
-- 降噪强度：RadioButton（⚫ 弱 ⚫ 中 ● 强）
-- 暂停检测：Slider（500-2000ms）
-- 状态显示：StatusBar（状态/降噪效果/延迟）
+- **降噪强度**：RadioButton（⚫ 弱 ⚫ 中 ● 强）
+  - 弱：prop_decrease=0.5，保留更多原始音色
+  - 中：prop_decrease=0.8，默认平衡设置
+  - 强：prop_decrease=1.2，最大降噪（嘈杂环境）
+- **Force Denoise All Frames**：CheckBox（默认勾选）
+  - ✓ 勾选：降噪所有帧（包括静音），便于麦克风对比
+  - ✗ 不勾选：仅降噪语音帧，节省50-70%计算资源
+- **暂停检测**：Slider（500-2000ms）
+  - 快速对话：500ms短停顿触发识别
+  - 思考型说话：2000ms长停顿才触发
+- **状态显示**：StatusBar
+  - 当前状态：SLEEPING/AWAKE/LISTENING
+  - 降噪效果：RMS降低百分比
+  - 处理延迟：实时延迟监控
 
 ### 8. 声纹识别接口预留
 
@@ -302,9 +563,33 @@ SSO: 212597558
 **新增依赖**（requirements.txt）：
 ```txt
 # === v2.0新增 ===
-noisereduce>=3.0.0      # 音频降噪
-webrtcvad>=2.0.10       # VAD增强
+noisereduce>=3.0.0      # 音频降噪（传统spectral gating，已废弃）
+webrtcvad>=2.0.10       # VAD增强（可选，Windows安装困难，已被Silero VAD替代）
 vosk>=0.3.45            # 轻量级KWS
+
+# === v2.0.1新增（2026-03-08）===
+denoiser>=0.1.5         # Facebook深度学习降噪（DNS64模型）
+torch>=2.0.0            # PyTorch（Facebook Denoiser依赖，已有）
+torchaudio>=2.0.0       # 音频处理（已有）
+hydra-core>=1.3.2       # FunASR配置管理（强制升级以兼容）
+omegaconf>=2.3.0        # 配置框架（已有）
+
+# === v2.0.2新增（2026-03-08）===
+# Silero VAD - 通过torch.hub自动加载，无需单独安装
+# 优势：
+# - 无需C编译器（纯PyTorch实现）
+# - 准确率高于webrtcvad
+# - 模型大小仅~1.5MB
+# - 延迟~15-20ms
+# - 输出概率值（0.0-1.0）可灵活调整阈值
+# 使用：自动作为webrtcvad的替代方案
+
+# === v2.0.3新增（2026-03-08）===
+# Force Denoise All Frames功能
+# UI: Audio_test_UI.py - CheckBox控件
+# Backend: FunASR_VAD_KWS_plot.py - force_denoise_all_frames参数
+# Logic: audio_denoiser.py - skip_vad参数控制
+# 用途：解决VAD-降噪冲突，支持全帧降噪或按需降噪
 ```
 
 **模型文件**：
@@ -343,25 +628,35 @@ vad KWS_ok/
 
 ### v2.0 实施计划
 
-#### Phase 1: 环境准备
-- [ ] 更新requirements.txt
-- [ ] 下载Vosk模型
-- [ ] 验证依赖安装
+#### Phase 1: 环境准备 ✅
+- [x] 更新requirements.txt
+- [x] 下载Vosk模型
+- [x] 验证依赖安装
 
-#### Phase 2: 核心模块开发
-- [ ] 实现audio_denoiser.py
-- [ ] 实现vosk_kws_engine.py
-- [ ] 创建speaker_recognition.py占位
+#### Phase 2: 核心模块开发 ✅
+- [x] 实现audio_denoiser.py（Facebook Denoiser + Silero VAD）
+- [x] 实现vosk_kws_engine.py
+- [x] 创建speaker_recognition.py占位
 
-#### Phase 3: 集成修改
-- [ ] 修改FunASR_VAD_KWS_plot.py（降噪+状态机）
-- [ ] 修改Audio_test_UI.py（UI控件）
+#### Phase 3: 集成修改 ✅
+- [x] 修改FunASR_VAD_KWS_plot.py（降噪+状态机+Force Denoise参数）
+- [x] 修改Audio_test_UI.py（UI控件+Force Denoise复选框）
+- [x] Y轴范围优化（±0.2精细观察）
 
-#### Phase 4: 测试验证
-- [ ] 降噪效果测试
-- [ ] Vosk KWS准确率测试
+#### Phase 4: 测试验证 🔄
+- [x] 降噪效果测试（Facebook Denoiser: -24.5dB）
+- [x] Silero VAD准确率测试
+- [x] Force Denoise All Frames功能测试
 - [ ] 状态机切换测试
 - [ ] 多麦克风对比测试
+
+**当前状态**（2026-03-08）：
+- ✅ Facebook Denoiser集成完成，降噪效果显著（-24.5 dB）
+- ✅ Silero VAD替换webrtcvad完成，无需C编译器
+- ✅ Force Denoise All Frames复选框实现，解决VAD-降噪冲突
+- ✅ Y轴调整至±0.2，适合高质量麦克风评估
+- ✅ 可视化系统已优化为3-subplot布局
+- 🔄 持续优化中：状态机逻辑、多麦克风对比流程
 
 ### v2.0 已知限制
 

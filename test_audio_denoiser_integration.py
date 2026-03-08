@@ -27,19 +27,23 @@ except Exception as e:
 
 # Test 1: Initialize with Facebook Denoiser (default)
 print("\n" + "=" * 60)
-print("Test 1: Initialize AudioDenoiser with Facebook Denoiser")
+print("Test 1: Initialize AudioDenoiser with Facebook Denoiser + Silero VAD")
 print("=" * 60)
 
 try:
     denoiser_fb = AudioDenoiser(
         sample_rate=16000,
         strength='medium',
-        denoiser_type='facebook'
+        denoiser_type='facebook',
+        vad_type='auto'  # Auto mode: prefer Silero > WebRTC
     )
     print(f"✅ Facebook Denoiser initialized successfully")
     print(f"   Denoiser type: {denoiser_fb.denoiser_type}")
+    print(f"   VAD type: {denoiser_fb.vad_active_type}")
     print(f"   Device: {denoiser_fb.device}")
     print(f"   Model loaded: {denoiser_fb.facebook_model is not None}")
+    if denoiser_fb.vad_active_type == 'silero':
+        print(f"   Silero threshold: {denoiser_fb.silero_threshold}")
 except Exception as e:
     print(f"❌ Failed to initialize Facebook Denoiser: {e}")
     exit(1)

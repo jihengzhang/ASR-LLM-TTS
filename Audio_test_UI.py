@@ -49,8 +49,8 @@ class AudioTestFrame(wx.Frame):
             buffer_duration=5.0,
             time_to_end_conversation=3,
             keywords=["hello", "Hi panda", "hi siri", "你好"],
-            stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"]
-
+            stopwords=["stop", "停止", "okay", "好了", "行了","好的", "退出"],
+            force_denoise_all_frames=True  # Default: always denoise all frames
         )
         self.processor_started = False
         self.processor.isDebug = False
@@ -144,20 +144,38 @@ class AudioTestFrame(wx.Frame):
         
         # v2.0: Add denoising strength controls
         denoise_box = wx.StaticBox(self.panel, label="Denoising Strength (降噪强度)")
-        denoise_sizer = wx.StaticBoxSizer(denoise_box, wx.HORIZONTAL)
+        denoise_sizer = wx.StaticBoxSizer(denoise_box, wx.VERTICAL)
         
+        # Radio buttons for strength
+        strength_sizer = wx.BoxSizer(wx.HORIZONTAL)
         self.denoise_weak = wx.RadioButton(self.panel, label="Weak (弱)", style=wx.RB_GROUP)
         self.denoise_medium = wx.RadioButton(self.panel, label="Medium (中)")
         self.denoise_strong = wx.RadioButton(self.panel, label="Strong (强)")
         self.denoise_medium.SetValue(True)  # Default to medium
         
-        denoise_sizer.Add(self.denoise_weak, 0, wx.ALL, 5)
-        denoise_sizer.Add(self.denoise_medium, 0, wx.ALL, 5)
-        denoise_sizer.Add(self.denoise_strong, 0, wx.ALL, 5)
+        strength_sizer.Add(self.denoise_weak, 0, wx.ALL, 5)
+        strength_sizer.Add(self.denoise_medium, 0, wx.ALL, 5)
+        strength_sizer.Add(self.denoise_strong, 0, wx.ALL, 5)
         
         self.denoise_weak.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('weak'))
         self.denoise_medium.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('medium'))
         self.denoise_strong.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('strong'))
+        
+        # Checkbox for force denoise mode
+        self.force_denoise_checkbox = wx.CheckBox(self.panel, label="Force Denoise All Frames (强制所有帧降噪)")
+        self.force_denoise_checkbox.SetValue(True)  # Default to True (always denoise)
+        self.force_denoise_checkbox.Bind(wx.EVT_CHECKBOX, self.on_force_denoise_changed)
+        
+        # Hint text
+        hint_text = wx.StaticText(self.panel, label="✓ Checked: Denoise all frames (speech + silence) | 未选: Only denoise when VAD detects speech")
+        hint_text.SetForegroundColour(wx.Colour(100, 100, 100))
+        font = hint_text.GetFont()
+        font.SetPointSize(8)
+        hint_text.SetFont(font)
+        
+        denoise_sizer.Add(strength_sizer, 0, wx.ALL, 5)
+        denoise_sizer.Add(self.force_denoise_checkbox, 0, wx.ALL, 5)
+        denoise_sizer.Add(hint_text, 0, wx.LEFT|wx.RIGHT|wx.BOTTOM, 5)
         
         main_sizer.Add(denoise_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
         
@@ -400,6 +418,14 @@ class AudioTestFrame(wx.Frame):
         if self.processor:
             self.processor.set_denoise_strength(strength)
             print(f"Denoising strength changed to: {strength}")
+    
+    def on_force_denoise_changed(self, event):
+        """Handle force denoise mode change"""
+        if self.processor:
+            force_denoise = self.force_denoise_checkbox.GetValue()
+            self.processor.set_force_denoise_all_frames(force_denoise)
+            mode = "All frames" if force_denoise else "Speech frames only (VAD-based)"
+            print(f"Force denoise mode changed to: {mode}")
     
     def on_pause_changed(self, event):
         """Handle pause threshold slider change"""
