@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Audio Denoiser Module
-Provides real-time audio noise reduction using webrtcvad and noisereduce.
+Provides real-time audio noise reduction using Silero VAD and noisereduce.
 
 Copyright (c) 2026 GE Healthcare
 Author: jiheng.zhang@gehealthcare.com
@@ -13,13 +13,6 @@ import numpy as np
 import logging
 from collections import deque
 from typing import Optional, Tuple
-
-try:
-    import webrtcvad
-    WEBRTCVAD_AVAILABLE = True
-except ImportError:
-    WEBRTCVAD_AVAILABLE = False
-    logging.warning("webrtcvad not available. Will try Silero VAD.")
 
 try:
     import torch
@@ -61,7 +54,7 @@ class AudioDenoiser:
     Real-time audio denoiser with adaptive noise estimation.
     
     Features:
-    - WebRTC VAD for pre-filtering (skip silence frames)
+    - Silero VAD for pre-filtering (skip silence frames)
     - Noisereduce spectral gating for noise reduction
     - Three strength levels: weak, medium, strong
     - Sliding window for noise profile estimation
@@ -83,10 +76,10 @@ class AudioDenoiser:
         Args:
             sample_rate: Audio sample rate in Hz (default: 16000)
             strength: Denoising strength - 'weak', 'medium', or 'strong'
-            vad_mode: WebRTC VAD aggressiveness (0-3, higher = more aggressive) or Silero threshold (0.0-1.0)
+            vad_mode: Silero threshold (0.0-1.0)
             noise_window_duration: Duration of noise estimation window in seconds
             denoiser_type: Type of denoiser - 'facebook' (deep learning, default) or 'noisereduce' (spectral gating)
-            vad_type: Type of VAD - 'auto' (prefer Silero > webrtc), 'silero', 'webrtc', or 'none'
+            vad_type: Type of VAD - 'auto' (prefer Silero), 'silero', or 'none'
         """
         self.sample_rate = sample_rate
         self.strength = strength
@@ -105,38 +98,23 @@ class AudioDenoiser:
             logging.warning(f"Invalid strength '{strength}', using 'medium'")
             self.strength = 'medium'
         
-        # Initialize VAD (prefer Silero > WebRTC)
-        self.vad = None
+        # Initialize VAD (Silero only)
         self.silero_vad = None
         self.silero_threshold = 0.5  # Default threshold for speech detection
         self.vad_active_type = 'none'  # Track which VAD is actually used
         
         if vad_type == 'auto':
-            # Auto mode: prefer Silero, fallback to WebRTC
+            # Auto mode: prefer Silero
             if SILERO_VAD_AVAILABLE:
                 self.silero_vad = silero_model
                 self.vad_active_type = 'silero'
                 self.silero_threshold = vad_mode if vad_mode <= 1.0 else 0.5
                 logging.info(f"Silero VAD initialized (threshold={self.silero_threshold:.2f})")
-            elif WEBRTCVAD_AVAILABLE:
-                try:
-                    self.vad = webrtcvad.Vad(int(vad_mode) if vad_mode > 1 else 2)
-                    self.vad_active_type = 'webrtc'
-                    logging.info(f"WebRTC VAD initialized (mode={int(vad_mode)})")
-                except Exception as e:
-                    logging.error(f"Failed to initialize WebRTC VAD: {e}")
         elif vad_type == 'silero' and SILERO_VAD_AVAILABLE:
             self.silero_vad = silero_model
             self.vad_active_type = 'silero'
             self.silero_threshold = vad_mode if vad_mode <= 1.0 else 0.5
             logging.info(f"Silero VAD initialized (threshold={self.silero_threshold:.2f})")
-        elif vad_type == 'webrtc' and WEBRTCVAD_AVAILABLE:
-            try:
-                self.vad = webrtcvad.Vad(int(vad_mode) if vad_mode > 1 else 2)
-                self.vad_active_type = 'webrtc'
-                logging.info(f"WebRTC VAD initialized (mode={int(vad_mode)})")
-            except Exception as e:
-                logging.error(f"Failed to initialize WebRTC VAD: {e}")
         elif vad_type != 'none':
             logging.warning(f"Requested VAD type '{vad_type}' not available")
         
@@ -196,7 +174,7 @@ class AudioDenoiser:
     
     def _is_speech(self, audio_frame: np.ndarray) -> bool:
         """
-        Check if audio frame contains speech using Silero VAD or WebRTC VAD
+        Check if audio frame contains speech using Silero VAD
         
         Args:
             audio_frame: Audio data as float32 array [-1, 1]
@@ -248,31 +226,6 @@ class AudioDenoiser:
                 
             except Exception as e:
                 logging.debug(f"Silero VAD error: {e}")
-                return True  # Assume speech on error
-        
-        # WebRTC VAD (fallback)
-        if self.vad_active_type == 'webrtc' and self.vad is not None:
-            try:
-                # Convert float32 [-1, 1] to int16
-                audio_int16 = (audio_frame * 32768.0).astype(np.int16)
-                audio_bytes = audio_int16.tobytes()
-                
-                # WebRTC VAD requires frame size of 10, 20, or 30ms
-                # For 16kHz: 160, 320, or 480 samples
-                frame_duration_ms = len(audio_frame) * 1000 // self.sample_rate
-                
-                # Adjust to nearest valid duration
-                if frame_duration_ms < 15:
-                    frame_duration_ms = 10
-                elif frame_duration_ms < 25:
-                    frame_duration_ms = 20
-                else:
-                    frame_duration_ms = 30
-                
-                return self.vad.is_speech(audio_bytes, self.sample_rate)
-            
-            except Exception as e:
-                logging.debug(f"WebRTC VAD error: {e}")
                 return True  # Assume speech on error
         
         # No VAD matched, assume speech
@@ -474,7 +427,7 @@ class AudioDenoiser:
             'avg_rms_after': np.mean(list(self.rms_after_history)) if self.rms_after_history else 0.0,
             'avg_reduction_db': self.get_average_reduction_db(),
             'strength': self.strength,
-            'vad_enabled': self.vad is not None
+            'vad_enabled': self.vad_active_type != 'none'
         }
     
     def reset_stats(self):

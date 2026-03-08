@@ -60,7 +60,6 @@ denoiser>=0.1.5             # Facebook Denoiser: Deep learning based speech enha
 #               Model size: ~1.5MB, downloaded on first use
 #               Input: 512 samples @ 16kHz, Output: probability 0.0-1.0
 #               Implementation: audio_denoiser.py lines 23-33
-# webrtcvad>=2.0.10         # [OPTIONAL] WebRTC VAD (requires C compiler, difficult on Windows)
 #                           # Silero VAD is used as default replacement (PyTorch-based, better accuracy)
 
 # Lightweight Keyword Spotting

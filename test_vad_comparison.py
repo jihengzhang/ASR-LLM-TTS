@@ -18,47 +18,9 @@ print("=" * 70)
 print("VAD Solutions Comparison")
 print("=" * 70)
 
-# Test 1: Try webrtcvad
+# Test 1: Try Silero VAD
 print("\n" + "=" * 70)
-print("Test 1: WebRTC VAD")
-print("=" * 70)
-
-try:
-    import webrtcvad
-    print("✅ webrtcvad installed")
-    
-    # Test basic functionality
-    vad = webrtcvad.Vad(3)  # Aggressiveness level 3 (most aggressive)
-    
-    # Generate test audio (1 second, 16kHz)
-    sample_rate = 16000
-    duration = 0.03  # 30ms frame
-    samples = int(duration * sample_rate)
-    
-    # Create test signal
-    audio = np.random.randn(samples) * 0.1
-    audio_int16 = (audio * 32768).astype(np.int16)
-    audio_bytes = audio_int16.tobytes()
-    
-    # Test VAD
-    start_time = time.time()
-    is_speech = vad.is_speech(audio_bytes, sample_rate)
-    elapsed = (time.time() - start_time) * 1000
-    
-    print(f"   Speech detected: {is_speech}")
-    print(f"   Processing time: {elapsed:.2f}ms")
-    print("✅ webrtcvad working correctly")
-    
-except ImportError as e:
-    print("❌ webrtcvad not installed")
-    print(f"   Error: {e}")
-    print("   Reason: Requires C compiler on Windows (difficult to install)")
-except Exception as e:
-    print(f"❌ webrtcvad error: {e}")
-
-# Test 2: Try Silero VAD
-print("\n" + "=" * 70)
-print("Test 2: Silero VAD (PyTorch-based)")
+print("Test 1: Silero VAD (PyTorch-based)")
 print("=" * 70)
 
 try:
@@ -138,9 +100,9 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-# Test 3: FunASR VAD (already in use)
+# Test 2: FunASR VAD (already in use)
 print("\n" + "=" * 70)
-print("Test 3: FunASR VAD (current system)")
+print("Test 2: FunASR VAD (current system)")
 print("=" * 70)
 
 try:
@@ -164,24 +126,23 @@ print("COMPARISON SUMMARY")
 print("=" * 70)
 
 comparison = """
-┌─────────────────┬──────────────┬────────────────┬──────────────────┐
-│ Feature         │ webrtcvad    │ Silero VAD     │ FunASR VAD       │
-├─────────────────┼──────────────┼────────────────┼──────────────────┤
-│ Installation    │ ❌ Difficult  │ ✅ Easy (PyTorch)│ ✅ Easy         │
-│ Model Size      │ Built-in     │ ~1.5MB         │ ~200MB           │
-│ Latency         │ <10ms        │ ~15-20ms       │ ~50-100ms        │
-│ Accuracy        │ ⭐⭐⭐         │ ⭐⭐⭐⭐⭐       │ ⭐⭐⭐⭐           │
-│ Language        │ Language-free│ Language-free  │ Chinese-optimized│
-│ Output          │ Boolean      │ Probability    │ Timestamps       │
-│ Use Case        │ Pre-filtering│ Main VAD       │ Segmentation     │
-└─────────────────┴──────────────┴────────────────┴──────────────────┘
+┌─────────────────┬────────────────┬──────────────────┐
+│ Feature         │ Silero VAD     │ FunASR VAD       │
+├─────────────────┼────────────────┼──────────────────┤
+│ Installation    │ ✅ Easy (PyTorch)│ ✅ Easy         │
+│ Model Size      │ ~1.5MB         │ ~200MB           │
+│ Latency         │ ~15-20ms       │ ~50-100ms        │
+│ Accuracy        │ ⭐⭐⭐⭐⭐       │ ⭐⭐⭐⭐           │
+│ Language        │ Language-free  │ Chinese-optimized│
+│ Output          │ Probability    │ Timestamps       │
+│ Use Case        │ Main VAD       │ Segmentation     │
+└─────────────────┴────────────────┴──────────────────┘
 """
 
 print(comparison)
 
 print("\n📊 RECOMMENDATIONS:")
 print("   1. 🥇 Use Silero VAD for real-time speech detection")
-print("      - Better accuracy than webrtcvad")
 print("      - Easy to install (no C compiler needed)")
 print("      - Fast inference (~15ms on CPU)")
 print("      - Probability output allows flexible thresholding")
@@ -190,11 +151,6 @@ print("   2. 🥈 Keep FunASR VAD for precise segmentation")
 print("      - Current system already uses it")
 print("      - Good for finding exact speech boundaries")
 print("      - Can work together with Silero VAD")
-print()
-print("   3. ❌ Skip webrtcvad")
-print("      - Installation issues on Windows")
-print("      - Lower accuracy than Silero VAD")
-print("      - Not worth the effort")
 
 print("\n🎯 PROPOSED ARCHITECTURE:")
 print("""

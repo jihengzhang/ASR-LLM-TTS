@@ -35,7 +35,7 @@ try:
         sample_rate=16000,
         strength='medium',
         denoiser_type='facebook',
-        vad_type='auto'  # Auto mode: prefer Silero > WebRTC
+        vad_type='auto'  # Auto mode: prefer Silero
     )
     print(f"✅ Facebook Denoiser initialized successfully")
     print(f"   Denoiser type: {denoiser_fb.denoiser_type}")
