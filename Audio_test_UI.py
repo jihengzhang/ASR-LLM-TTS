@@ -61,8 +61,7 @@ class AudioTestFrame(wx.Frame):
         self.initial_message += "Press F5 or click the Refresh button to update the list of available audio devices.\n"
         self.initial_message += "Select an audio input device from the dropdown menu.\n"
         
-        # Create buttons
-        button_size = wx.Size(35, 30)  # 约等于10个字符宽，高度增加一倍至60像素
+        # Create buttons (removed button_size - let wxPython auto-size based on content)
         # Top frame for buttons
         btn_sizer = wx.BoxSizer(wx.HORIZONTAL)
         
@@ -113,9 +112,9 @@ class AudioTestFrame(wx.Frame):
         # 使用特殊样式创建按钮，禁用空格键触发和TAB焦点
         button_style = wx.BORDER_NONE  # 不使用WANTS_CHARS，因为它会捕获空格键
         
-        self.start_btn = wx.Button(self.panel, label="Start VAD/KWS Processor", size=button_size, style=button_style)
-        self.stop_btn = wx.Button(self.panel, label="Stop Processor", size=button_size, style=button_style)
-        self.quit_btn = wx.Button(self.panel, label="Quit", size=button_size, style=button_style)
+        self.start_btn = wx.Button(self.panel, label="Start VAD/KWS Processor", style=button_style)
+        self.stop_btn = wx.Button(self.panel, label="Stop Processor", style=button_style)
+        self.quit_btn = wx.Button(self.panel, label="Quit", style=button_style)
         
         # 禁用按钮的TAB焦点和空格键激活
         for btn in [self.start_btn, self.stop_btn, self.quit_btn]:
@@ -143,21 +142,74 @@ class AudioTestFrame(wx.Frame):
         main_sizer.Add(top_row_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
         main_sizer.Add(btn_sizer, proportion=0, flag=wx.EXPAND)
         
+        # v2.0: Add denoising strength controls
+        denoise_box = wx.StaticBox(self.panel, label="Denoising Strength (降噪强度)")
+        denoise_sizer = wx.StaticBoxSizer(denoise_box, wx.HORIZONTAL)
+        
+        self.denoise_weak = wx.RadioButton(self.panel, label="Weak (弱)", style=wx.RB_GROUP)
+        self.denoise_medium = wx.RadioButton(self.panel, label="Medium (中)")
+        self.denoise_strong = wx.RadioButton(self.panel, label="Strong (强)")
+        self.denoise_medium.SetValue(True)  # Default to medium
+        
+        denoise_sizer.Add(self.denoise_weak, 0, wx.ALL, 5)
+        denoise_sizer.Add(self.denoise_medium, 0, wx.ALL, 5)
+        denoise_sizer.Add(self.denoise_strong, 0, wx.ALL, 5)
+        
+        self.denoise_weak.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('weak'))
+        self.denoise_medium.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('medium'))
+        self.denoise_strong.Bind(wx.EVT_RADIOBUTTON, lambda e: self.on_denoise_changed('strong'))
+        
+        main_sizer.Add(denoise_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
+        
+        # v2.0: Add pause detection threshold slider
+        pause_box = wx.StaticBox(self.panel, label="Speech Pause Detection Threshold (语音暂停检测阈值)")
+        pause_sizer = wx.StaticBoxSizer(pause_box, wx.HORIZONTAL)
+        
+        self.pause_slider = wx.Slider(
+            self.panel, 
+            value=1000,  # Default 1000ms
+            minValue=500, 
+            maxValue=2000,
+            style=wx.SL_HORIZONTAL | wx.SL_LABELS
+        )
+        self.pause_slider.SetTickFreq(250)
+        self.pause_slider.Bind(wx.EVT_SLIDER, self.on_pause_changed)
+        
+        pause_label = wx.StaticText(self.panel, label="500ms")
+        pause_sizer.Add(pause_label, 0, wx.ALIGN_CENTER_VERTICAL|wx.RIGHT, 5)
+        pause_sizer.Add(self.pause_slider, 1, wx.EXPAND|wx.LEFT|wx.RIGHT, 5)
+        pause_label_end = wx.StaticText(self.panel, label="2000ms")
+        pause_sizer.Add(pause_label_end, 0, wx.ALIGN_CENTER_VERTICAL|wx.LEFT, 5)
+        
+        main_sizer.Add(pause_sizer, proportion=0, flag=wx.EXPAND|wx.ALL, border=5)
+        
         # Frame for matplotlib plot
         self.plot_panel = wx.Panel(self.panel)
-        self.plot_panel.SetMinSize((600, 400))
+        self.plot_panel.SetMinSize((800, 450))
+        self.plot_panel.SetBackgroundColour(wx.Colour(240, 240, 240))  # Light gray background
         
         # Embed matplotlib figure in wxPython
+        plot_sizer = wx.BoxSizer(wx.VERTICAL)
         self.canvas = None
-        if hasattr(self.processor, 'fig'):
-            self.canvas = FigureCanvas(self.plot_panel, -1, self.processor.fig)
-            plot_sizer = wx.BoxSizer(wx.VERTICAL)
-            plot_sizer.Add(self.canvas, 1, wx.EXPAND|wx.ALL)
-            self.plot_panel.SetSizer(plot_sizer)
-            # 确保canvas获取合适的大小
-            self.canvas.SetMinSize(self.plot_panel.GetMinSize())
+        if hasattr(self.processor, 'fig') and self.processor.fig is not None:
+            try:
+                self.canvas = FigureCanvas(self.plot_panel, -1, self.processor.fig)
+                plot_sizer.Add(self.canvas, 1, wx.EXPAND|wx.ALL, border=2)
+                # 确保canvas获取合适的大小
+                self.canvas.SetMinSize((800, 450))
+            except Exception as e:
+                print(f"Error creating canvas: {e}")
+                error_text = wx.StaticText(self.plot_panel, label=f"Error loading plot: {e}")
+                plot_sizer.Add(error_text, 1, wx.EXPAND|wx.ALL, border=10)
+        else:
+            placeholder_text = wx.StaticText(self.plot_panel, 
+                                            label="Plot will appear here after starting the processor",
+                                            style=wx.ALIGN_CENTER)
+            placeholder_text.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_ITALIC, wx.FONTWEIGHT_NORMAL))
+            plot_sizer.Add(placeholder_text, 1, wx.EXPAND|wx.ALL|wx.ALIGN_CENTER_VERTICAL, border=10)
         
-        main_sizer.Add(self.plot_panel, proportion=8, flag=wx.EXPAND|wx.ALL, border=5)
+        self.plot_panel.SetSizer(plot_sizer)
+        main_sizer.Add(self.plot_panel, proportion=3, flag=wx.EXPAND|wx.ALL, border=5)
         
         # Text box for KWS/ASR results with label at the top
         result_sizer = wx.BoxSizer(wx.VERTICAL)
@@ -165,34 +217,34 @@ class AudioTestFrame(wx.Frame):
         # Add title at the top, spanning full width
         result_label = wx.StaticText(self.panel, label="KWS/ASR Results:", 
                                     style=wx.ALIGN_LEFT)
-        result_label.SetFont(wx.Font(12, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
+        result_label.SetFont(wx.Font(10, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
         
-        self.result_text = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE|wx.TE_READONLY)
-        self.result_text.SetFont(wx.Font(11, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
+        self.result_text = wx.TextCtrl(self.panel, style=wx.TE_MULTILINE|wx.TE_READONLY, size=(-1, 120))
+        self.result_text.SetFont(wx.Font(9, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL))
         
         # Set initial message with timestamp
         timestamp = datetime.now().strftime('%H:%M:%S')
         self.result_text.SetValue(f"{timestamp}: {self.initial_message}")
         
-        result_sizer.Add(result_label, proportion=0, flag=wx.EXPAND|wx.BOTTOM, border=5)
+        result_sizer.Add(result_label, proportion=0, flag=wx.EXPAND|wx.BOTTOM, border=3)
         result_sizer.Add(self.result_text, proportion=1, flag=wx.EXPAND)
         
-        # Reduced text box height by 1/3 (from proportion=2 to proportion=1)
+        # Add results with smaller proportion to give more space to plot
         main_sizer.Add(result_sizer, proportion=1, flag=wx.EXPAND|wx.ALL, border=5)
         
-        # Add status bar at the bottom of the UI
-        status_sizer = wx.BoxSizer(wx.HORIZONTAL)
-        self.status_text = wx.StaticText(self.panel, label="Status: Waiting for keyword", 
-                                      style=wx.ALIGN_LEFT)
-        self.status_text.SetFont(wx.Font(11, wx.FONTFAMILY_DEFAULT, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_BOLD))
-        self.status_text.SetForegroundColour(wx.Colour(0, 0, 150))  # Dark blue color
-        
-        status_sizer.Add(self.status_text, proportion=1, flag=wx.EXPAND|wx.LEFT, border=5)
-        
-        # Add status bar to main sizer
-        main_sizer.Add(status_sizer, proportion=0, flag=wx.EXPAND|wx.BOTTOM|wx.LEFT|wx.RIGHT, border=5)
+        # v2.0: Create status bar with 3 fields
+        self.CreateStatusBar(3)
+        self.SetStatusWidths([-2, -1, -1])  # Proportional widths
+        self.SetStatusText("⚫ SLEEPING", 0)  # State indicator
+        self.SetStatusText("Denoise: --", 1)  # Denoise stats
+        self.SetStatusText("Latency: --", 2)  # Processing latency
         
         self.panel.SetSizer(main_sizer)
+        
+        # Force layout refresh - CRITICAL for proper display
+        self.panel.Layout()
+        self.Layout()
+        main_sizer.Layout()
         
         # Setup timers for updating the plot and results
         self.plot_timer = wx.Timer(self)
@@ -235,6 +287,10 @@ class AudioTestFrame(wx.Frame):
         # Ensure recording directory exists
         if not os.path.exists(self.recordings_dir):
             os.makedirs(self.recordings_dir)
+        
+        # Final layout adjustments and window positioning
+        self.Centre()  # Center the window on screen
+        self.SetMinSize((1000, 600))  # Set minimum window size
         
     def on_start(self, event):
         # if self.processor_started:
@@ -311,9 +367,50 @@ class AudioTestFrame(wx.Frame):
             self.result_text.SetValue(text)
             self.result_text.ShowPosition(self.result_text.GetLastPosition())
             
-            # Update status text at the bottom of UI
-            if hasattr(self.processor, 'status'):
-                self.status_text.SetLabel(f"Status: {self.processor.status}")
+            # v2.0: Update status bar with 3 fields
+            if hasattr(self.processor, 'state'):
+                # Field 0: State indicator with colored icon
+                state = self.processor.state
+                if state == 'SLEEPING':
+                    state_text = "⚫ SLEEPING"
+                elif state == 'AWAKE':
+                    state_text = "🟢 AWAKE"
+                elif state == 'LISTENING':
+                    state_text = "🔴 LISTENING"
+                else:
+                    state_text = f"⚫ {state}"
+                self.SetStatusText(state_text, 0)
+            
+            # Field 1: Denoising stats
+            if hasattr(self.processor, 'get_denoise_stats'):
+                try:
+                    rms_before, rms_after, reduction_db = self.processor.get_denoise_stats()
+                    if reduction_db != 0.0:
+                        self.SetStatusText(f"Denoise: {reduction_db:.1f}dB", 1)
+                except:
+                    pass
+            
+            # Field 2: Processing latency (placeholder - can be enhanced)
+            # For now, just show a simple indicator
+            self.SetStatusText("Ready", 2)
+    
+    # v2.0: Event handlers for new controls
+    def on_denoise_changed(self, strength):
+        """Handle denoising strength change"""
+        if self.processor:
+            self.processor.set_denoise_strength(strength)
+            print(f"Denoising strength changed to: {strength}")
+    
+    def on_pause_changed(self, event):
+        """Handle pause threshold slider change"""
+        if self.processor:
+            value_ms = self.pause_slider.GetValue()
+            threshold_s = value_ms / 1000.0
+            self.processor.set_pause_threshold(threshold_s)
+            # Update the status bar to show current value
+            # Note: We could add a label near the slider instead
+            if self.processor_started:
+                print(f"Pause threshold changed to: {value_ms}ms")
     
     def populate_audio_devices(self):
         """Populate the audio devices dropdown"""
@@ -509,13 +606,20 @@ class AudioTestFrame(wx.Frame):
                                  wx.OK | wx.ICON_INFORMATION)
                 else:
                     self.space_pressed = True
+                    
+                    # v2.0: Change state to LISTENING
+                    if hasattr(self.processor, 'set_state'):
+                        self.processor.set_state('LISTENING')
+                    
                     # 使用处理器的录音功能
                     if self.processor.start_recording():
                         # 更改录音指示器颜色为红色
                         self.recording_indicator.SetForegroundColour(wx.Colour(255, 0, 0))
                         # 更新状态文本为 "Recording"
-                        self.status_text.SetLabel("Status: Recording")
-                        self.recording_indicator.SetLabel("⚫ Recording")
+                        self.recording_indicator.SetLabel("🔴 Recording")
+                        
+                        # v2.0: Update status bar
+                        self.SetStatusText("🔴 LISTENING (Space)", 0)
                         
                         # 更新UI以反映录音状态 - 使用简单的信息
                         timestamp = datetime.now().strftime('%H:%M:%S')
@@ -563,12 +667,16 @@ class AudioTestFrame(wx.Frame):
             # 停止处理器中的录音
             self.processor.stop_recording()
             
+            # v2.0: Return to SLEEPING state (will be managed by state machine)
+            if hasattr(self.processor, 'set_state'):
+                self.processor.set_state('SLEEPING')
+            
             # 恢复录音指示器颜色为灰色
             self.recording_indicator.SetForegroundColour(wx.Colour(128, 128, 128))
             self.recording_indicator.SetLabel("⚫")
             
-            # 恢复状态文本为等待关键词
-            self.status_text.SetLabel("Status: Waiting for keyword")
+            # v2.0: Update status bar
+            self.SetStatusText("⚫ SLEEPING", 0)
             
             # 简单显示录音已停止
             timestamp = datetime.now().strftime('%H:%M:%S')

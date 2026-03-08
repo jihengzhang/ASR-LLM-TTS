@@ -46,3 +46,19 @@ pyyaml==6.0.2
 omegaconf==2.3.0
 editdistance==0.8.1
 certifi==2025.7.14
+
+# ==================== v2.0 New Dependencies ====================
+# Audio Enhancement and Lightweight KWS
+
+# Noise Reduction
+noisereduce>=3.0.0          # Audio denoising using spectral gating
+
+# Enhanced VAD
+webrtcvad>=2.0.10           # WebRTC Voice Activity Detection
+
+# Lightweight Keyword Spotting
+vosk>=0.3.45                # Offline speech recognition for wake word detection
+
+# Future: Speaker Recognition (uncomment when implementing)
+# resemblyzer>=0.1.1        # Speaker verification/diarization
+# pyannote.audio>=2.1.1     # Advanced speaker diarization toolkit

@@ -42,6 +42,28 @@ from matplotlib.animation import FuncAnimation
 from scipy import signal
 import collections
 
+# v2.0 New imports: Audio denoiser, Vosk KWS, Speaker recognition
+try:
+    from audio_denoiser import AudioDenoiser
+    DENOISER_AVAILABLE = True
+except ImportError:
+    print("Warning: audio_denoiser not available. Noise reduction disabled.")
+    DENOISER_AVAILABLE = False
+
+try:
+    from vosk_kws_engine import VoskKWSEngine
+    VOSK_AVAILABLE = True
+except ImportError:
+    print("Warning: vosk_kws_engine not available. Lightweight KWS disabled.")
+    VOSK_AVAILABLE = False
+
+try:
+    from speaker_recognition import DummySpeakerRecognizer
+    SPEAKER_RECOG_AVAILABLE = True
+except ImportError:
+    print("Warning: speaker_recognition not available.")
+    SPEAKER_RECOG_AVAILABLE = False
+
 # Check if FunASR is available
 try:
     from funasr import AutoModel
@@ -78,7 +100,10 @@ class VADKWSProcessor:
     def __init__(self, sample_rate=16000, chunk_size=1600, channels=1,
                  format=pyaudio.paInt16, threshold=0.01,
                  silence_duration=1.5, vad_interval=0.25, 
-                 buffer_duration=3.0, keywords=None, stopwords="stop", time_to_end_conversation=10):
+                 buffer_duration=3.0, keywords=None, stopwords="stop", time_to_end_conversation=10,
+                 enable_denoiser=True, denoise_strength='medium',
+                 enable_vosk_kws=True, vosk_model_path=None,
+                 enable_speaker_recog=False, pause_threshold=1.0):
         """
         Initialize the processor
         
@@ -168,6 +193,61 @@ class VADKWSProcessor:
         # Keywords to detect
         self.keywords = keywords or ["你好", "小艾", "开始", "小度", "小爱", "Hi Michael", "Hi Panda"]
         
+        # v2.0: State machine for wake-word detection
+        self.state = 'SLEEPING'  # SLEEPING | AWAKE | LISTENING
+        self.awake_timeout = 5.0  # Seconds to stay awake after last speech
+        self.last_speech_time = time.time()
+        self.pause_threshold = pause_threshold  # Adjustable pause detection threshold
+        
+        # v2.0: Audio denoiser
+        self.audio_denoiser = None
+        self.denoised_audio_buffer = collections.deque(maxlen=25 * sample_rate)  # 降噪后音频
+        if enable_denoiser and DENOISER_AVAILABLE:
+            try:
+                self.audio_denoiser = AudioDenoiser(
+                    sample_rate=sample_rate,
+                    strength=denoise_strength,
+                    vad_mode=2,
+                    noise_window_duration=0.5
+                )
+                print(f"✅ Audio denoiser enabled (strength: {denoise_strength})")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize denoiser: {e}")
+                self.audio_denoiser = None
+        
+        # v2.0: Vosk lightweight KWS
+        self.vosk_kws = None
+        if enable_vosk_kws and VOSK_AVAILABLE:
+            try:
+                if vosk_model_path is None:
+                    vosk_model_path = os.path.join(os.path.dirname(__file__), 
+                                                   'models', 'vosk_models', 
+                                                   'vosk-model-small-cn-0.22')
+                if os.path.exists(vosk_model_path):
+                    self.vosk_kws = VoskKWSEngine(
+                        model_path=vosk_model_path,
+                        keywords=self.keywords,
+                        sample_rate=sample_rate,
+                        confidence_threshold=0.7,
+                        use_grammar=True
+                    )
+                    print(f"✅ Vosk KWS engine enabled")
+                else:
+                    print(f"⚠️  Vosk model not found at: {vosk_model_path}")
+                    print("Please run: python download_vosk_model.py cn-small")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize Vosk KWS: {e}")
+                self.vosk_kws = None
+        
+        # v2.0: Speaker recognition (placeholder)
+        self.speaker_recognizer = None
+        if enable_speaker_recog and SPEAKER_RECOG_AVAILABLE:
+            try:
+                self.speaker_recognizer = DummySpeakerRecognizer()
+                print(f"✅ Speaker recognition enabled (placeholder)")
+            except Exception as e:
+                print(f"⚠️  Failed to initialize speaker recognition: {e}")
+        
         # Thread pool
         self.threads = []
         
@@ -210,6 +290,65 @@ class VADKWSProcessor:
         
         # Setup visualization
         self.setup_visualization()  # add visualization later
+    
+    # v2.0: Setter methods for UI controls
+    def set_denoise_strength(self, strength: str):
+        """
+        Change denoising strength
+        
+        Args:
+            strength: 'weak', 'medium', or 'strong'
+        """
+        if self.audio_denoiser is not None:
+            self.audio_denoiser.set_strength(strength)
+            print(f"Denoising strength changed to: {strength}")
+        else:
+            print("Warning: Denoiser not available")
+    
+    def set_pause_threshold(self, threshold_seconds: float):
+        """
+        Set pause detection threshold
+        
+        Args:
+            threshold_seconds: Pause duration in seconds (0.5-2.0 recommended)
+        """
+        if 0.5 <= threshold_seconds <= 5.0:
+            self.pause_threshold = threshold_seconds
+            print(f"Pause threshold changed to: {threshold_seconds:.2f}s")
+        else:
+            print(f"Warning: Pause threshold {threshold_seconds} out of range (0.5-5.0)")
+    
+    def set_state(self, new_state: str):
+        """
+        Change system state (SLEEPING/AWAKE/LISTENING)
+        
+        Args:
+            new_state: Target state
+        """
+        if new_state in ['SLEEPING', 'AWAKE', 'LISTENING']:
+            with self.lock:
+                old_state = self.state
+                self.state = new_state
+                self.last_speech_time = time.time()
+                print(f"State changed: {old_state} → {new_state}")
+        else:
+            print(f"Warning: Invalid state '{new_state}'")
+    
+    def get_denoise_stats(self):
+        """
+        Get denoising statistics for UI display
+        
+        Returns:
+            tuple: (rms_before, rms_after, reduction_db)
+        """
+        if self.audio_denoiser is not None:
+            stats = self.audio_denoiser.get_stats()
+            return (
+                stats['avg_rms_before'], 
+                stats['avg_rms_after'], 
+                stats['avg_reduction_db']
+            )
+        return (0.0, 0.0, 0.0)
     
     def check_audio_devices(self):
         """Check available audio devices and select input device"""
@@ -567,25 +706,46 @@ class VADKWSProcessor:
             # 保存原始音频数据到显示缓冲区
             with self.lock:
                 self.audio_buffer_original.append((audio_data_norm, current_time))
+            
+            # v2.0: Apply denoising if enabled
+            audio_denoised = audio_data_norm
+            if self.audio_denoiser is not None:
+                try:
+                    audio_denoised, denoise_stats = self.audio_denoiser.denoise_frame(
+                        audio_data_norm, skip_vad=False
+                    )
+                    # Save denoised audio to buffer
+                    with self.lock:
+                        self.denoised_audio_buffer.append((audio_denoised, current_time))
+                except Exception as e:
+                    if self.isDebug:
+                        print(f"Denoising error: {e}")
+                    audio_denoised = audio_data_norm
+            else:
+                # No denoiser, just copy original
+                with self.lock:
+                    self.denoised_audio_buffer.append((audio_data_norm, current_time))
                 
             # Call audio frame callback if set (for recording feature)
             if self.audio_frame_callback is not None:
-                self.audio_frame_callback(audio_data_norm)
+                # Use denoised audio for recording
+                self.audio_frame_callback(audio_denoised)
             
             # 如果正在录音，保存音频数据到录音缓冲区
             if self.is_recording:
-                # 保存原始数据用于WAV文件保存（保持int16格式）
-                self.recording_frames.append(audio_data.copy())
+                # 保存降噪后的数据用于WAV文件保存（转回int16格式）
+                audio_denoised_int16 = (audio_denoised * 32768.0).astype(np.int16)
+                self.recording_frames.append(audio_denoised_int16.copy())
                 if self.isDebug:
                     if len(self.recording_frames) % 10 == 0:  # 每10帧输出一次，避免过多日志
                         duration = sum(len(frame) for frame in self.recording_frames) / self.sample_rate
                         print(f"Recording: {len(self.recording_frames)} frames, {duration:.2f} seconds")
                 
-            # Put in queue for processing
+            # Put denoised audio in queue for processing
             try:
-                self.audio_data_queue.put_nowait((audio_data_norm, current_time))
+                self.audio_data_queue.put_nowait((audio_denoised, current_time))
                 if self.isDebug:
-                    print(f"Audio data added to queue，length: {len(audio_data_norm)}")
+                    print(f"Audio data added to queue，length: {len(audio_denoised)}")
             except queue.Full:
                 pass
         except Exception as e:
@@ -1012,7 +1172,7 @@ class VADKWSProcessor:
         SLIP_WINDOW_SIZE = int(SLIP_WINDOW_TIME * self.sample_rate)
         MIN_CHUNK = self.chunk_size
         MAX_CHUNK = 50 * MIN_CHUNK
-        PAUSE_VOICE_THRESHOLD = self.silence_duration
+        PAUSE_VOICE_THRESHOLD = self.pause_threshold  # v2.0: Use adjustable threshold
         END_CONV_THRESHOLD = self.time_to_end_conversation
         chunk_duration = SLIP_WINDOW_SIZE / self.sample_rate
         
@@ -1046,6 +1206,37 @@ class VADKWSProcessor:
                         print("No audio data in queue")
                         # break
                     continue
+                
+                # v2.0: State machine - lightweight KWS in SLEEPING state
+                current_state = self.state
+                if current_state == 'SLEEPING' and self.vosk_kws is not None:
+                    # In SLEEPING state: only run Vosk for wake word detection
+                    try:
+                        result = self.vosk_kws.detect_keyword(audio_data, return_partial=False)
+                        if result['detected']:
+                            # Wake word detected! Switch to AWAKE state
+                            with self.lock:
+                                self.state = 'AWAKE'
+                                self.last_speech_time = time.time()
+                                self.keyword_status_history.append((True, timestamp))
+                            print(f"🟢 WAKE WORD DETECTED: '{result['keyword']}' (confidence: {result['confidence']:.2f})")
+                            print(f"State changed: SLEEPING → AWAKE")
+                            # Add to detected keywords for visualization
+                            with self.lock:
+                                self.detected_keywords.append((result['keyword'], timestamp))
+                    except Exception as e:
+                        if self.isDebug:
+                            print(f"Vosk KWS error: {e}")
+                    # In SLEEPING state, skip FunASR processing
+                    continue
+                
+                # Check for AWAKE timeout (auto sleep after no speech)
+                if current_state == 'AWAKE':
+                    if time.time() - self.last_speech_time > self.awake_timeout:
+                        with self.lock:
+                            self.state = 'SLEEPING'
+                            print(f"⚫ Auto-sleep: AWAKE → SLEEPING (timeout: {self.awake_timeout}s)")
+                        continue
                 
                 # Data is already normalized and single-channel from callback
                 audio_buffer_kws = np.concatenate([audio_buffer_kws, audio_data])
