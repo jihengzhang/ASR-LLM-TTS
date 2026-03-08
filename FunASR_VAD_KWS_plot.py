@@ -715,11 +715,14 @@ class VADKWSProcessor:
             audio_data_norm = audio_data.astype(np.float32) / 32768.0
 
             # Add to buffer collector with timestamp
+            # Use end time of audio frame for accurate visualization
             current_time = time.time()
+            frame_duration = len(audio_data_norm) / self.sample_rate
+            frame_end_time = current_time  # current_time is approximately the end time
             
             # 保存原始音频数据到显示缓冲区
             with self.lock:
-                self.audio_buffer_original.append((audio_data_norm, current_time))
+                self.audio_buffer_original.append((audio_data_norm, frame_end_time))
             
             # v2.0: Apply denoising if enabled
             audio_denoised = audio_data_norm
@@ -733,7 +736,12 @@ class VADKWSProcessor:
                     )
                     # Save denoised audio to buffer
                     with self.lock:
-                        self.denoised_audio_buffer.append((audio_denoised, current_time))
+                        self.denoised_audio_buffer.append((audio_denoised, frame_end_time))
+                        # Store Silero VAD detection status for ax2 visualization
+                        # 0.1 = speech detected, 0.0 = silence
+                        # Note: Silero VAD processes first 512 samples (32ms) of each frame
+                        vad_state = 0.1 if denoise_stats.get('is_speech', False) else 0.0
+                        self.detected_vad.append((vad_state, frame_end_time))
                 except Exception as e:
                     if self.isDebug:
                         print(f"Denoising error: {e}")
@@ -741,7 +749,7 @@ class VADKWSProcessor:
             else:
                 # No denoiser, just copy original
                 with self.lock:
-                    self.denoised_audio_buffer.append((audio_data_norm, current_time))
+                    self.denoised_audio_buffer.append((audio_data_norm, frame_end_time))
                 
             # Call audio frame callback if set (for recording feature)
             if self.audio_frame_callback is not None:
@@ -760,7 +768,7 @@ class VADKWSProcessor:
                 
             # Put denoised audio in queue for processing
             try:
-                self.audio_data_queue.put_nowait((audio_denoised, current_time))
+                self.audio_data_queue.put_nowait((audio_denoised, frame_end_time))
                 if self.isDebug:
                     print(f"Audio data added to queue，length: {len(audio_denoised)}")
             except queue.Full:
@@ -1012,9 +1020,9 @@ class VADKWSProcessor:
             self.ax1.grid(True, alpha=0.3)
             self.ax1.xaxis.set_major_formatter(plt.FuncFormatter(format_time))
             
-            # v2.0: 更新语音检测子图 (ax2) - 显示降噪音频和VAD检测结果
+            # v2.0: 更新语音检测子图 (ax2) - 显示降噪音频和Silero VAD检测结果
             self.ax2.clear()
-            self.ax2.set_title('Denoised Audio (蓝色) and VAD Detection (红色)')
+            self.ax2.set_title('Denoised Audio (蓝色) and Silero VAD Detection (红色)')
             
             # v2.0: 绘制降噪后音频（蓝色，背景）
             if all_denoised_timestamps:
@@ -1023,7 +1031,7 @@ class VADKWSProcessor:
                 self.ax2.plot(denoised_timestamps, denoised_samples, 'b-', 
                              linewidth=0.8, alpha=0.6, label='Denoised')
 
-            # Plot VAD detection results - 过滤掉任何None时间戳
+            # Plot Silero VAD detection results - 过滤掉任何None时间戳
             filtered_vad = []
             for vad_level, ts in detected_vad_copy:
                 if ts is None:
@@ -1048,7 +1056,7 @@ class VADKWSProcessor:
                     
                     # Add point at new state
                     vad_times.append(ts)
-                    vad_values.append(level)  # 直接使用level值(0或0.5)
+                    vad_values.append(level)  # 使用level值: 0.1=检测到语音, 0=静音
                     
                     last_level = level
                     last_time = ts
@@ -1057,9 +1065,9 @@ class VADKWSProcessor:
                 vad_times.append(current_time)
                 vad_values.append(last_level)
                 
-                # Plot VAD line
+                # Plot Silero VAD line
                 self.ax2.plot(vad_times, vad_values, 'r-', 
-                             linewidth=2.0, alpha=0.7, label='VAD')
+                             linewidth=2.0, alpha=0.7, label='Silero VAD')
 
             self.ax2.legend(loc='upper left', fontsize=9)
             self.ax2.set_xlim(start_time, current_time)
@@ -1387,27 +1395,29 @@ class VADKWSProcessor:
                         vad_item = vad_result[0]  # 获取第一个结果
                         vad_value = vad_item.get('value', [])  # 获取value列表
                     
-                        with self.lock:
-                            if not vad_value:
-                                # value为空列表时，标记为0 - 但确保时间戳不为None
-                                if speech_start_time is not None:
-                                    self.detected_vad.append((0, speech_start_time))
-                                else:
-                                    print("警告: speech_start_time为None，跳过添加VAD检测记录")
-                            else:
-                                # 对于每个检测到的语音区间
-                                for segment in vad_value:
-                                    start_sample, end_sample = segment
-                                    # 将采样点索引转换为时间戳，但先检查speech_start_time是否为None
-                                    if speech_start_time is not None:
-                                        start_time = speech_start_time + start_sample / self.sample_rate
-                                        end_time = speech_start_time + end_sample / self.sample_rate
-                                        
-                                        # 记录语音区间的起始和结束，使用0.5表示检测到语音
-                                        self.detected_vad.append((0.5, start_time))
-                                        self.detected_vad.append((0, end_time))
-                                    else:
-                                        print("警告: speech_start_time为None，无法计算VAD时间戳")
+                        # Note: FunASR VAD results are for segmentation only
+                        # Silero VAD status is displayed in ax2 (updated in audio_callback)
+                        # with self.lock:
+                        #     if not vad_value:
+                        #         # value为空列表时，标记为0 - 但确保时间戳不为None
+                        #         if speech_start_time is not None:
+                        #             self.detected_vad.append((0, speech_start_time))
+                        #         else:
+                        #             print("警告: speech_start_time为None，跳过添加VAD检测记录")
+                        #     else:
+                        #         # 对于每个检测到的语音区间
+                        #         for segment in vad_value:
+                        #             start_sample, end_sample = segment
+                        #             # 将采样点索引转换为时间戳，但先检查speech_start_time是否为None
+                        #             if speech_start_time is not None:
+                        #                 start_time = speech_start_time + start_sample / self.sample_rate
+                        #                 end_time = speech_start_time + end_sample / self.sample_rate
+                        #                 
+                        #                 # 记录语音区间的起始和结束，使用0.5表示检测到语音
+                        #                 self.detected_vad.append((0.5, start_time))
+                        #                 self.detected_vad.append((0, end_time))
+                        #             else:
+                        #                 print("警告: speech_start_time为None，无法计算VAD时间戳")
                 else:
                     if self.isDebug:
                         print("VAD model not available, skipping VAD detection")

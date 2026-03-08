@@ -214,11 +214,26 @@ class AudioDenoiser:
                 # Silero VAD requires exactly 512 samples for 16kHz (32ms)
                 required_samples = 512 if self.sample_rate == 16000 else 256
                 
-                # Pad or truncate to required size
-                if len(audio_frame) < required_samples:
+                # For frames longer than required_samples, use sliding window
+                if len(audio_frame) > required_samples:
+                    # Check multiple windows and take maximum probability
+                    max_prob = 0.0
+                    stride = required_samples // 2  # 50% overlap
+                    
+                    for start in range(0, len(audio_frame) - required_samples + 1, stride):
+                        window = audio_frame[start:start + required_samples]
+                        audio_tensor = torch.from_numpy(window).float()
+                        
+                        with torch.no_grad():
+                            speech_prob = self.silero_vad(audio_tensor, self.sample_rate).item()
+                        
+                        max_prob = max(max_prob, speech_prob)
+                    
+                    return max_prob > self.silero_threshold
+                
+                # For frames shorter than or equal to required_samples
+                elif len(audio_frame) < required_samples:
                     audio_padded = np.pad(audio_frame, (0, required_samples - len(audio_frame)))
-                elif len(audio_frame) > required_samples:
-                    audio_padded = audio_frame[:required_samples]
                 else:
                     audio_padded = audio_frame
                 
@@ -314,22 +329,22 @@ class AudioDenoiser:
             self.rms_after_history.append(rms_before)
             return audio_frame, stats
         
-        # VAD check (skip processing for silence frames to save compute)
-        if not skip_vad:
-            is_speech = self._is_speech(audio_frame)
-            stats['is_speech'] = is_speech
-            
-            if is_speech:
-                self.speech_frame_count += 1
-            else:
-                self.silence_frame_count += 1
-                # For silence, add to noise buffer and return original
-                self.noise_buffer.extend(audio_frame)
-                stats['rms_after'] = rms_before
-                self.rms_after_history.append(rms_before)
-                return audio_frame, stats
+        # Always check VAD to get true speech status (for statistics and visualization)
+        is_speech = self._is_speech(audio_frame)
+        stats['is_speech'] = is_speech
+        
+        if is_speech:
+            self.speech_frame_count += 1
         else:
-            stats['is_speech'] = True
+            self.silence_frame_count += 1
+        
+        # Decide whether to process based on skip_vad flag
+        if not skip_vad and not is_speech:
+            # VAD-based filtering enabled and no speech detected: skip processing
+            self.noise_buffer.extend(audio_frame)
+            stats['rms_after'] = rms_before
+            self.rms_after_history.append(rms_before)
+            return audio_frame, stats
         
         # Update noise buffer
         self.noise_buffer.extend(audio_frame)
